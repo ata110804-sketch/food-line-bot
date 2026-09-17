@@ -1,7 +1,9 @@
 import os
-import re
+import base64
+import requests
 
 from flask import Flask, request, abort
+from openai import OpenAI
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -12,114 +14,36 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import (
+    MessageEvent,
+    TextMessageContent,
+    ImageMessageContent,
+)
 
 
 app = Flask(__name__)
 
+# ===== LINE 設定 =====
+LINE_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
+
 configuration = Configuration(
-    access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+    access_token=LINE_ACCESS_TOKEN
 )
 
 handler = WebhookHandler(
-    os.environ["LINE_CHANNEL_SECRET"]
+    LINE_CHANNEL_SECRET
 )
 
-
-# 台灣常見食物資料庫
-# 數值為常見份量的概略值：
-# 熱量 kcal / 蛋白質 g / 碳水 g / 脂肪 g
-FOODS = {
-    "蛋餅": {
-        "calories": 300,
-        "protein": 10,
-        "carbs": 35,
-        "fat": 13,
-        "unit": "1份"
-    },
-    "茶葉蛋": {
-        "calories": 75,
-        "protein": 7,
-        "carbs": 1,
-        "fat": 5,
-        "unit": "1顆"
-    },
-    "水煮蛋": {
-        "calories": 70,
-        "protein": 6,
-        "carbs": 1,
-        "fat": 5,
-        "unit": "1顆"
-    },
-    "香蕉": {
-        "calories": 100,
-        "protein": 1,
-        "carbs": 27,
-        "fat": 0,
-        "unit": "1根"
-    },
-    "無糖豆漿": {
-        "calories": 100,
-        "protein": 9,
-        "carbs": 8,
-        "fat": 4,
-        "unit": "約400ml"
-    },
-    "白飯": {
-        "calories": 280,
-        "protein": 5,
-        "carbs": 62,
-        "fat": 1,
-        "unit": "1碗"
-    },
-    "雞胸肉": {
-        "calories": 165,
-        "protein": 31,
-        "carbs": 0,
-        "fat": 4,
-        "unit": "100g"
-    },
-    "地瓜": {
-        "calories": 120,
-        "protein": 2,
-        "carbs": 28,
-        "fat": 0,
-        "unit": "約150g"
-    },
-    "鮭魚": {
-        "calories": 208,
-        "protein": 20,
-        "carbs": 0,
-        "fat": 13,
-        "unit": "100g"
-    },
-    "御飯糰": {
-        "calories": 200,
-        "protein": 5,
-        "carbs": 40,
-        "fat": 3,
-        "unit": "1個"
-    },
-    "雞腿便當": {
-        "calories": 700,
-        "protein": 35,
-        "carbs": 85,
-        "fat": 25,
-        "unit": "1份"
-    },
-    "滷肉飯": {
-        "calories": 450,
-        "protein": 12,
-        "carbs": 65,
-        "fat": 16,
-        "unit": "1碗"
-    },
-}
+# ===== OpenAI 設定 =====
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"]
+)
 
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food Bot is running!"
+    return "LINE Food AI Bot is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -135,74 +59,154 @@ def callback():
     return "OK"
 
 
-def analyze_food(text):
-    found = []
-
-    for name, data in FOODS.items():
-        if name in text:
-            found.append((name, data))
-
-    if not found:
-        return (
-            "🥹 我目前還不認識這個食物～\n\n"
-            "目前可以辨識：\n"
-            "蛋餅、茶葉蛋、水煮蛋、香蕉、無糖豆漿、"
-            "白飯、雞胸肉、地瓜、鮭魚、御飯糰、"
-            "雞腿便當、滷肉飯\n\n"
-            "之後我們會繼續增加食物資料庫 🍱"
-        )
-
-    total_calories = 0
-    total_protein = 0
-    total_carbs = 0
-    total_fat = 0
-
-    lines = ["🍱 飲食分析", ""]
-
-    for name, data in found:
-        total_calories += data["calories"]
-        total_protein += data["protein"]
-        total_carbs += data["carbs"]
-        total_fat += data["fat"]
-
-        lines.append(
-            f"• {name}（{data['unit']}）"
-            f"：約 {data['calories']} kcal"
-        )
-
-    lines.extend([
-        "",
-        f"🔥 熱量：約 {total_calories} kcal",
-        f"🥩 蛋白質：約 {total_protein} g",
-        f"🍚 碳水：約 {total_carbs} g",
-        f"🥑 脂肪：約 {total_fat} g",
-        "",
-        "📌 數值為常見份量估算，實際營養會依品牌、"
-        "份量及烹調方式不同。"
-    ])
-
-    return "\n".join(lines)
-
-
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_message(event):
-    user_text = event.message.text.strip()
-
-    result = analyze_food(user_text)
-
+def reply_text(reply_token, text):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
 
         line_bot_api.reply_message(
             ReplyMessageRequest(
-                reply_token=event.reply_token,
+                reply_token=reply_token,
                 messages=[
-                    TextMessage(text=result)
+                    TextMessage(text=text)
                 ],
             )
         )
 
 
+# ===== 收到文字 =====
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_text(event):
+
+    reply_text(
+        event.reply_token,
+        "🍱 快點傳給我你今天吃了啥!！\n\n"
+        "直接傳一張餐點照片給我 📷\n"
+        "我會幫你辨識食物並估算營養。"
+    )
+
+
+# ===== 收到圖片 =====
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image(event):
+
+    try:
+        # 取得 LINE 使用者傳來的圖片
+        message_id = event.message.id
+
+        image_url = (
+            f"https://api-data.line.me/"
+            f"v2/bot/message/{message_id}/content"
+        )
+
+        response = requests.get(
+            image_url,
+            headers={
+                "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
+            },
+            timeout=30,
+        )
+
+        response.raise_for_status()
+
+        image_bytes = response.content
+        content_type = response.headers.get(
+            "Content-Type",
+            "image/jpeg"
+        )
+
+        # 轉成 OpenAI 可以讀取的 base64 圖片
+        image_base64 = base64.b64encode(
+            image_bytes
+        ).decode("utf-8")
+
+        data_url = (
+            f"data:{content_type};base64,"
+            f"{image_base64}"
+        )
+
+        # ===== AI 分析 =====
+        ai_response = client.responses.create(
+            model="gpt-5.6-luna",
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": """
+你是一位台灣飲食營養紀錄助手。
+
+請分析這張餐點照片。
+
+請：
+1. 判斷照片中有哪些食物。
+2. 估計每種食物的份量。
+3. 估算每種食物的熱量。
+4. 估算整餐的：
+   - 總熱量 kcal
+   - 蛋白質 g
+   - 碳水化合物 g
+   - 脂肪 g
+5. 如果無法從照片確定重量、醬料、
+   烹調油或內餡，請清楚說明是估算值。
+6. 使用繁體中文。
+7. 回覆要適合直接顯示在 LINE，
+   簡潔、好閱讀。
+
+格式：
+
+🍱 AI 餐點分析
+
+【辨識到的食物】
+• 食物：估計份量｜約 xxx kcal
+• 食物：估計份量｜約 xxx kcal
+
+🔥 總熱量：約 xxx kcal
+🥩 蛋白質：約 xx g
+🍚 碳水：約 xx g
+🥑 脂肪：約 xx g
+
+💡 簡短飲食建議：
+一句話即可。
+
+⚠️ 照片分析為估算值，實際營養會受到
+份量、調味與烹調方式影響。
+"""
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": data_url,
+                            "detail": "low",
+                        },
+                    ],
+                }
+            ],
+        )
+
+        result = ai_response.output_text
+
+        reply_text(
+            event.reply_token,
+            result
+        )
+
+    except Exception as e:
+
+        print("IMAGE ANALYSIS ERROR:", repr(e))
+
+        reply_text(
+            event.reply_token,
+            "🥲 這張照片目前分析失敗了。\n"
+            "請稍後再傳一次，我會再試試看！"
+        )
+
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(
+        os.environ.get("PORT", 5000)
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
