@@ -96,7 +96,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V5.2 is running!"
+    return "LINE Food AI Bot V5.2.1 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -1124,29 +1124,92 @@ def water_status_reply(user_id, extra_title=None):
     )
 
 
+def has_plain_water_context(text):
+    """
+    只有明確在講「白開水／飲水」才啟動飲水帳本。
+    豆漿、牛奶、咖啡、茶、飲料等不直接算白開水。
+    """
+    t = str(text or "").lower().strip()
+
+    non_water_drinks = [
+        "豆漿", "牛奶", "拿鐵", "咖啡", "奶茶", "紅茶", "綠茶",
+        "烏龍", "茶", "果汁", "可樂", "汽水", "飲料", "酒",
+        "運動飲料", "能量飲料", "湯",
+    ]
+    if any(word in t for word in non_water_drinks):
+        return False
+
+    strong_water_words = [
+        "喝水", "飲水", "白開水", "開水", "水量", "補水",
+        "水目標", "飲水目標", "喝水目標",
+    ]
+    if any(word in t for word in strong_water_words):
+        return True
+
+    # 「喝了300ml」這種日常省略「水」的說法可以接受，
+    # 但必須同時有喝的動作 + 容量單位，避免把雞胸300g之類誤判。
+    has_drink_action = bool(re.search(r"(喝了|喝完|剛剛喝|我喝|有喝|再喝|喝掉)", t))
+    has_volume = bool(re.search(r"\d+(?:\.\d+)?\s*(ml|毫升|cc)", t, re.I))
+    return has_drink_action and has_volume
+
+
 def extract_water_amount(text):
-    t = text.lower().replace(",", "").replace("毫升", "ml").replace("cc", "ml")
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(ml|mL)", t, re.I)
+    t = str(text or "").lower().replace(",", "")
+    t = t.replace("毫升", "ml").replace("cc", "ml")
+
+    if not has_plain_water_context(text):
+        return None
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*ml", t, re.I)
     if match:
         return float(match.group(1))
 
-    # 「喝一杯水」沒有容量時不亂猜，讓使用者補容量。
+    # 有明確「喝水」語境時，允許「喝水300」這種省略單位的寫法。
+    if any(k in t for k in ["喝水", "飲水", "白開水", "開水", "補水"]):
+        match = re.search(r"(\d+(?:\.\d+)?)", t)
+        if match:
+            value = float(match.group(1))
+            if 1 <= value <= 5000:
+                return value
+
     return None
 
 
 def is_water_log_message(text):
-    t = text.lower()
-    water_words = ["喝水", "水", "補水"]
-    action_words = ["喝了", "喝完", "剛剛喝", "再加", "加了", "記"]
-    return any(w in t for w in water_words) and any(a in t for a in action_words)
+    t = str(text or "").lower()
+    if not has_plain_water_context(t):
+        return False
+
+    # 目標、查詢、刪除、重置交給各自規則，不當成新增飲水。
+    blocked = ["目標", "多少", "進度", "紀錄", "刪", "重置", "清空", "恢復"]
+    if any(word in t for word in blocked):
+        return False
+
+    action_words = [
+        "喝了", "喝完", "剛剛喝", "我喝", "有喝", "再喝",
+        "喝水", "補水", "加水", "記水",
+    ]
+    return any(word in t for word in action_words)
 
 
 def water_target_from_text(text):
-    t = text.lower().replace(",", "").replace("毫升", "ml").replace("cc", "ml")
-    if not any(k in t for k in ["水目標", "喝水目標", "飲水目標"]):
+    t = str(text or "").lower().replace(",", "")
+    t = t.replace("毫升", "ml").replace("cc", "ml")
+
+    target_phrases = [
+        "水目標", "喝水目標", "飲水目標",
+        "每天喝水目標", "每日喝水目標",
+    ]
+    if not any(k in t for k in target_phrases):
         return None
-    match = re.search(r"(\d+(?:\.\d+)?)\s*ml", t, re.I)
-    return float(match.group(1)) if match else None
+
+    # 因為已經有明確「喝水目標」關鍵字，所以 2000 / 2000ml 都可接受。
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:ml)?", t, re.I)
+    if not match:
+        return None
+
+    value = float(match.group(1))
+    return value if 500 <= value <= 6000 else None
 
 
 def usage_help():
@@ -1321,7 +1384,7 @@ def handle_text(event):
             target = get_water_target(user_id)
             reply_text(
                 event.reply_token,
-                f"💧 你目前的每日喝水目標是 {target:,} mL。\\n"
+                f"💧 你目前的每日喝水目標是 {target:,} mL。\n"
                 "要改可以直接說：『水目標改2000ml』"
             )
             return
@@ -1341,7 +1404,7 @@ def handle_text(event):
                 set_water_target(user_id, target_ml)
                 reply_text(
                     event.reply_token,
-                    f"💧 好，每日喝水目標改成 {round(target_ml):,} mL。\\n"
+                    f"💧 好，每日喝水目標改成 {round(target_ml):,} mL。\n"
                     "既然是你自己訂的，之後沒喝到就不要裝失憶🙂"
                 )
             except ValueError as e:
@@ -1351,7 +1414,7 @@ def handle_text(event):
         if text in ["刪掉上一筆喝水", "刪除上一筆喝水", "剛剛的水不要算"]:
             deleted = delete_last_water(user_id)
             if deleted:
-                reply_text(event.reply_token, "🗑️ 上一筆喝水已刪除。\\n\\n" + water_status_reply(user_id))
+                reply_text(event.reply_token, "🗑️ 上一筆喝水已刪除。\n\n" + water_status_reply(user_id))
             else:
                 reply_text(event.reply_token, "今天沒有喝水紀錄可以刪。")
             return
@@ -1361,12 +1424,22 @@ def handle_text(event):
             reply_text(event.reply_token, f"🗑️ 今天喝水紀錄已清空，共 {count} 筆。")
             return
 
+        if has_plain_water_context(text) and any(
+            phrase in text for phrase in ["我今天有喝水", "今天有喝水", "有喝水", "喝了水", "剛剛喝水"]
+        ) and extract_water_amount(text) is None:
+            reply_text(
+                event.reply_token,
+                "💧 有喝水我知道了，但你喝多少？\n"
+                "告訴我容量才記得進去，例如：『喝了300ml』"
+            )
+            return
+
         if is_water_log_message(text):
             amount = extract_water_amount(text)
             if amount is None:
                 reply_text(
                     event.reply_token,
-                    "💧 有喝很好，但容量要告訴我，不然我不能通靈🙂\\n"
+                    "💧 有喝很好，但容量要告訴我，不然我不能通靈🙂\n"
                     "例如：『喝了300ml』"
                 )
                 return
