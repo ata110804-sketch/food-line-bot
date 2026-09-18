@@ -28,15 +28,35 @@ from linebot.v3.webhooks import (
     StickerMessageContent,
 )
 
-from food_ai import (
-    analyze_food_image,
-    analyze_food_text,
-    correct_food_analysis,
-    add_food_to_analysis,
-    classify_user_text,
-    food_chat,
-    off_topic_reply,
-)
+import food_ai as _food_ai
+
+analyze_food_image = _food_ai.analyze_food_image
+correct_food_analysis = _food_ai.correct_food_analysis
+add_food_to_analysis = _food_ai.add_food_to_analysis
+classify_user_text = _food_ai.classify_user_text
+food_chat = _food_ai.food_chat
+off_topic_reply = _food_ai.off_topic_reply
+
+# 相容保護：即使 Render 暫時還載到舊版 food_ai.py，也不會因缺少
+# analyze_food_text 而整個服務啟動失敗。
+if hasattr(_food_ai, "analyze_food_text"):
+    analyze_food_text = _food_ai.analyze_food_text
+else:
+    def analyze_food_text(text, meal_type=None):
+        meal_label = meal_type or "未指定餐別"
+        prompt = f"""
+使用者正在新增一筆實際飲食紀錄。
+餐別：{meal_label}
+使用者描述：「{text}」
+請只分析實際吃下或喝下的內容，不要提供建議。
+依台灣常見份量合理估算每項食物的 estimated_grams、calories、protein、carbs、fat、fiber、sodium。
+meal_name 要簡短；total 為各項合理加總；份量不確定時採中心估計並降低 confidence。
+comment 最多一句。
+"""
+        return _food_ai.structured_response(
+            _food_ai.FOOD_SYSTEM_PROMPT, prompt, _food_ai.FOOD_SCHEMA,
+            "text_food_analysis", max_tokens=1000
+        )
 
 from database import (
     init_database,
