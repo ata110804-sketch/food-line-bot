@@ -60,6 +60,18 @@ from database import (
     clear_daily_targets,
     get_effective_targets,
     save_weight,
+    add_water,
+    get_today_water,
+    get_water_total,
+    get_water_target,
+    set_water_target,
+    reset_water_target,
+    delete_last_water,
+    reset_water_day,
+    get_month_water_summary,
+    should_show_yesterday_summary,
+    mark_yesterday_summary_shown,
+    get_yesterday_snapshot,
 )
 
 
@@ -84,7 +96,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V4 is running!"
+    return "LINE Food AI Bot V5.2 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -1067,6 +1079,191 @@ def extract_month(text):
     return year, month
 
 
+
+# =========================================================
+# V5.2：喝水／昨日摘要／使用說明
+# =========================================================
+
+def water_progress_bar(percent):
+    filled = max(0, min(10, int(round(float(percent or 0) / 10))))
+    return "█" * filled + "░" * (10 - filled)
+
+
+def water_status_reply(user_id, extra_title=None):
+    water = get_today_water(user_id)
+    total = int(water["total_ml"])
+    target = int(water["target_ml"])
+    remaining = int(water["remaining_ml"])
+    percent = float(water["percent"])
+    hour = datetime.now(TAIWAN_TZ).hour
+
+    if water["reached"]:
+        comment = random.choice([
+            "今天達標。很好，這項暫時沒有東西可以嘴你 😌",
+            "水有喝夠，過關。今天不是仙人掌了 🌵",
+            "漂亮，今天喝水有做事。這題我閉嘴 😎",
+        ])
+    elif hour >= 20 and percent < 70:
+        comment = "都晚上了還差這麼多，你的水壺今天是在放年假嗎🙂"
+    elif hour >= 15 and percent < 50:
+        comment = "都下午了這進度很有勇氣🙂 先去補個 300～500 mL。"
+    elif percent < 30:
+        comment = "這進度有點像靠空氣補水🙂 水拿起來，先喝一杯。"
+    elif remaining <= 300:
+        comment = "都走到這裡了，最後一杯不要給我擺爛。"
+    else:
+        comment = "還沒達標，看到水就喝幾口，別等口渴才想到它。"
+
+    title = (extra_title + "\n") if extra_title else ""
+    return (
+        f"{title}💧 今日喝水\n"
+        f"{total:,} / {target:,} mL\n"
+        f"{water_progress_bar(percent)} {round(percent)}%\n"
+        f"還差 {remaining:,} mL\n\n"
+        f"{comment}"
+    )
+
+
+def extract_water_amount(text):
+    t = text.lower().replace(",", "").replace("毫升", "ml").replace("cc", "ml")
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(ml|mL)", t, re.I)
+    if match:
+        return float(match.group(1))
+
+    # 「喝一杯水」沒有容量時不亂猜，讓使用者補容量。
+    return None
+
+
+def is_water_log_message(text):
+    t = text.lower()
+    water_words = ["喝水", "水", "補水"]
+    action_words = ["喝了", "喝完", "剛剛喝", "再加", "加了", "記"]
+    return any(w in t for w in water_words) and any(a in t for a in action_words)
+
+
+def water_target_from_text(text):
+    t = text.lower().replace(",", "").replace("毫升", "ml").replace("cc", "ml")
+    if not any(k in t for k in ["水目標", "喝水目標", "飲水目標"]):
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*ml", t, re.I)
+    return float(match.group(1)) if match else None
+
+
+def usage_help():
+    return (
+        "📖 BOT 使用說明\n\n"
+        "📸 記錄飲食\n"
+        "直接傳餐點照片，我會辨識並記進今天帳本。\n"
+        "例：『剛剛飯只吃一半』『那不是肉，是豆干』\n\n"
+        "📊 今日進度\n"
+        "『今天還能吃多少？』『蛋白質還差多少？』\n\n"
+        "🍱 吃什麼\n"
+        "『晚餐吃什麼？』『我想吃鮭魚怎麼配？』\n\n"
+        "💧 喝水\n"
+        "『喝了500ml』『今天喝多少？』『水目標改2000ml』\n\n"
+        "🏃 運動\n"
+        "『今天只有20分鐘，做什麼？』『今天很累想動一下』\n\n"
+        "⚖️ 體重\n"
+        "『今天58.6kg』\n\n"
+        "📅 紀錄\n"
+        "『今日紀錄』『月紀錄』『昨日紀錄』\n\n"
+        "🛠️ 管理\n"
+        "『刪掉上一餐』『重置今天』『我的資料』『我的目標』\n\n"
+        "不用背格式，直接跟我講人話就好🙂"
+    )
+
+
+def yesterday_summary_reply(user_id):
+    snap = get_yesterday_snapshot(user_id)
+    totals = totals_to_dict(snap.get("totals"))
+    water = snap.get("water") or {}
+    targets = snap.get("targets") or {}
+
+    if totals["meal_count"] == 0 and float(water.get("total_ml") or 0) <= 0:
+        return None
+
+    lines = [
+        f"📅 昨日紀錄｜{snap['date'].strftime('%m/%d')}",
+        f"🍽️ {totals['meal_count']} 餐｜🔥 {round(totals['calories'])} kcal",
+        f"🥩 {round(totals['protein'], 1)}g｜🍚 {round(totals['carbs'], 1)}g｜🥑 {round(totals['fat'], 1)}g",
+    ]
+
+    water_total = int(float(water.get("total_ml") or 0))
+    if water_total:
+        lines.append(f"💧 喝水 {water_total:,} mL")
+
+    comments = []
+    cal_target = targets.get("calorie_target")
+    protein_target = targets.get("protein_target")
+
+    if cal_target:
+        diff = float(totals["calories"]) - float(cal_target)
+        if diff > 150:
+            comments.append(f"熱量超過約 {round(diff)} kcal，昨天吃完就算了，今天正常吃，別演絕食戲碼🙂")
+        elif diff < -300:
+            comments.append(f"熱量比目標少約 {round(abs(diff))} kcal，減脂不是比誰餓得久。")
+        else:
+            comments.append("熱量大致在目標附近，這項可以。")
+
+    if protein_target:
+        pdiff = float(protein_target) - float(totals["protein"])
+        if pdiff > 10:
+            comments.append(f"蛋白質還差約 {round(pdiff)}g，今天記得補起來。")
+
+    if comments:
+        lines.append("")
+        lines.append("📝 " + "\n".join(comments[:2]))
+
+    return "\n".join(lines)
+
+
+def maybe_push_yesterday_summary(user_id):
+    """每天第一次互動時主動補一則昨日摘要；沒有昨日紀錄就安靜略過。"""
+    try:
+        if not should_show_yesterday_summary(user_id):
+            return
+
+        summary = yesterday_summary_reply(user_id)
+        mark_yesterday_summary_shown(user_id)
+
+        if not summary:
+            return
+
+        # 用 Push API，不占用這次事件的 reply token。
+        requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers={
+                "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "to": user_id,
+                "messages": [{"type": "text", "text": summary}],
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        # 昨日摘要失敗不能影響主要功能
+        print("YESTERDAY_SUMMARY_ERROR:", repr(e), flush=True)
+
+
+def interaction_water_nudge(user_id):
+    """互動式提醒：只用在查詢／打招呼等情境，不會因為一則訊息狂洗版。"""
+    try:
+        water = get_today_water(user_id)
+        hour = datetime.now(TAIWAN_TZ).hour
+        percent = float(water.get("percent") or 0)
+
+        if hour >= 20 and percent < 60:
+            return "💧 順便提醒：都晚上了，今天的水還沒到六成。你的水壺不是擺設🙂"
+        if hour >= 15 and percent < 35:
+            return "💧 順便提醒：下午了水還不到四成，先補一杯，別靠意志力補水🙂"
+        return None
+    except Exception:
+        return None
+
+
+
 # =========================================================
 # 文字訊息
 # =========================================================
@@ -1078,6 +1275,7 @@ def handle_text(event):
 
     try:
         current_profile = get_profile(user_id)
+        maybe_push_yesterday_summary(user_id)
 
         # -------------------------------------------------
         # 日常互動：嗨／早安／晚安／謝謝
@@ -1086,6 +1284,104 @@ def handle_text(event):
         casual = social_reply(text)
         if casual:
             reply_text(event.reply_token, casual)
+            return
+
+        # -------------------------------------------------
+        # V5.2 使用說明
+        # -------------------------------------------------
+
+        if text.lower() in [
+            "怎麼用", "使用說明", "使用方法", "指令", "help",
+            "你會什麼", "功能", "功能說明",
+        ]:
+            reply_text(event.reply_token, usage_help())
+            return
+
+        # -------------------------------------------------
+        # V5.2 昨日紀錄
+        # -------------------------------------------------
+
+        if text in ["昨日紀錄", "昨天紀錄", "昨天吃了什麼", "昨日飲食", "昨天飲食"]:
+            summary = yesterday_summary_reply(user_id)
+            reply_text(
+                event.reply_token,
+                summary or "📅 昨天沒有找到飲食或喝水紀錄。",
+            )
+            return
+
+        # -------------------------------------------------
+        # V5.2 喝水
+        # -------------------------------------------------
+
+        if text in ["今天喝多少", "今天喝多少水", "喝水進度", "今日喝水", "喝水紀錄"]:
+            reply_text(event.reply_token, water_status_reply(user_id))
+            return
+
+        if text in ["我的喝水目標", "喝水目標", "飲水目標"]:
+            target = get_water_target(user_id)
+            reply_text(
+                event.reply_token,
+                f"💧 你目前的每日喝水目標是 {target:,} mL。\\n"
+                "要改可以直接說：『水目標改2000ml』"
+            )
+            return
+
+        if text in ["恢復喝水預設", "恢復飲水預設", "重設喝水目標"]:
+            reset_water_target(user_id)
+            target = get_water_target(user_id)
+            reply_text(
+                event.reply_token,
+                f"✅ 已恢復依體重估算的喝水目標：{target:,} mL／天。"
+            )
+            return
+
+        target_ml = water_target_from_text(text)
+        if target_ml is not None:
+            try:
+                set_water_target(user_id, target_ml)
+                reply_text(
+                    event.reply_token,
+                    f"💧 好，每日喝水目標改成 {round(target_ml):,} mL。\\n"
+                    "既然是你自己訂的，之後沒喝到就不要裝失憶🙂"
+                )
+            except ValueError as e:
+                reply_text(event.reply_token, f"⚠️ {e}")
+            return
+
+        if text in ["刪掉上一筆喝水", "刪除上一筆喝水", "剛剛的水不要算"]:
+            deleted = delete_last_water(user_id)
+            if deleted:
+                reply_text(event.reply_token, "🗑️ 上一筆喝水已刪除。\\n\\n" + water_status_reply(user_id))
+            else:
+                reply_text(event.reply_token, "今天沒有喝水紀錄可以刪。")
+            return
+
+        if text in ["重置今天喝水", "清空今天喝水", "喝水重置"]:
+            count = reset_water_day(user_id)
+            reply_text(event.reply_token, f"🗑️ 今天喝水紀錄已清空，共 {count} 筆。")
+            return
+
+        if is_water_log_message(text):
+            amount = extract_water_amount(text)
+            if amount is None:
+                reply_text(
+                    event.reply_token,
+                    "💧 有喝很好，但容量要告訴我，不然我不能通靈🙂\\n"
+                    "例如：『喝了300ml』"
+                )
+                return
+
+            try:
+                add_water(user_id, amount)
+                reply_text(
+                    event.reply_token,
+                    water_status_reply(
+                        user_id,
+                        f"✅ +{round(amount):,} mL，記下來了。"
+                    )
+                )
+            except ValueError as e:
+                reply_text(event.reply_token, f"⚠️ {e}")
             return
 
         # -------------------------------------------------
@@ -1552,6 +1848,9 @@ def handle_text(event):
 
 @handler.add(MessageEvent, message=StickerMessageContent)
 def handle_sticker(event):
+    user_id = get_user_id(event)
+    maybe_push_yesterday_summary(user_id)
+
     replies = [
         "收到你的貼圖了 😂 有吃東西的話照片也一起交出來。",
         "貼圖很會喔🙂 今天飲食有乖乖記嗎？",
@@ -1569,6 +1868,7 @@ def handle_sticker(event):
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event):
     user_id = get_user_id(event)
+    maybe_push_yesterday_summary(user_id)
 
     # 先讓使用者知道 BOT 有收到照片。LINE 新訊息送出時動畫會自動消失。
     start_loading(user_id, 60)
