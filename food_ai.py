@@ -711,7 +711,7 @@ INTENT_SCHEMA = {
         },
         "meal_type": {
             "type": ["string", "null"],
-            "enum": ["早餐", "午餐", "晚餐", "點心", null]
+            "enum": ["早餐", "午餐", "晚餐", "點心", None]
         },
         "target_date": {"type": ["string", "null"]},
         "report_year": {"type": ["integer", "null"]},
