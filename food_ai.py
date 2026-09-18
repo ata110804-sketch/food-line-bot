@@ -647,3 +647,431 @@ def understand_recipes(vision_data):
         response.output_text
     )
 
+# =========================================================
+# 第三層：營養估算 / 合理性檢查
+# =========================================================
+
+NUTRITION_PROMPT = """
+你是熟悉台灣飲食的營養估算系統。
+
+你會收到：
+
+1. 第一層的食物辨識結果
+2. 第二層的料理 / 原料理解結果
+
+你的任務是根據：
+食物種類、數量、估計重量、料理組成與烹調方式，
+估算這一餐的營養。
+
+━━━━━━━━━━━━━━━━━━
+【1. 營養項目】
+━━━━━━━━━━━━━━━━━━
+
+每項食物估算：
+
+- 熱量 kcal
+- 蛋白質 protein_g
+- 碳水 carbohydrate_g
+- 脂肪 fat_g
+- 膳食纖維 fiber_g
+- 鈉 sodium_mg
+
+並計算整餐總和。
+
+━━━━━━━━━━━━━━━━━━
+【2. 份量優先】
+━━━━━━━━━━━━━━━━━━
+
+如果第一層有 estimated_grams，
+優先使用重量計算。
+
+如果沒有重量，
+才依照台灣常見份量估計。
+
+例如：
+
+水煮蛋 1 顆
+應以一般雞蛋可食份量估算。
+
+白飯 1 碗
+應以台灣常見一碗熟飯份量估算。
+
+不要假裝知道照片無法支持的精確重量。
+
+━━━━━━━━━━━━━━━━━━
+【3. 複合料理】
+━━━━━━━━━━━━━━━━━━
+
+複合料理使用第二層 ingredients 理解營養來源。
+
+例如：
+
+原味蛋餅：
+蛋餅皮 + 雞蛋 + 合理煎油量
+
+鮪魚蛋餅：
+蛋餅皮 + 雞蛋 + 鮪魚 + 煎油
+possible 的美乃滋不可直接當成確定存在。
+
+ingredient_source = "possible"
+的成分：
+
+如果沒有其他證據，
+不要直接完整計入總熱量。
+
+可以用 uncertainty_note 提醒。
+
+━━━━━━━━━━━━━━━━━━
+【4. 烹調油】
+━━━━━━━━━━━━━━━━━━
+
+煎、炒、炸料理要考慮合理的吸油量。
+
+但不要因為看到「煎」
+就假設使用大量油脂。
+
+依台灣一般餐飲合理估計。
+
+油炸食品則必須考慮吸油造成的熱量。
+
+━━━━━━━━━━━━━━━━━━
+【5. 飲料】
+━━━━━━━━━━━━━━━━━━
+
+如果第一層只能辨識為「飲料」，
+不要擅自猜糖量與營養。
+
+這種情況：
+nutrition_confidence 應降低，
+並在 uncertainty_note 說明
+需要飲料名稱或營養標示才能更準。
+
+如果明確辨識為：
+無糖豆漿、鮮奶、美式咖啡等，
+才可以合理估算。
+
+━━━━━━━━━━━━━━━━━━
+【6. 不製造假精準】
+━━━━━━━━━━━━━━━━━━
+
+這是外食照片估算工具。
+
+營養數值本來就存在誤差。
+
+不要因為 JSON 需要數字，
+就假裝結果精確到實驗室程度。
+
+數字可以使用合理的近似值。
+
+例如：
+76 kcal
+可以。
+
+但不要因為估算而寫：
+76.348 kcal
+
+━━━━━━━━━━━━━━━━━━
+【7. 熱量合理性檢查】
+━━━━━━━━━━━━━━━━━━
+
+完成後必須自行檢查：
+
+蛋白質 × 4
++
+碳水 × 4
++
+脂肪 × 9
+
+應與估計熱量大致合理。
+
+因為纖維、酒精、糖醇、標示差異、
+四捨五入等因素，
+不要求完全相等。
+
+但如果差距非常大，
+必須重新檢查估算。
+
+━━━━━━━━━━━━━━━━━━
+【8. 總和檢查】
+━━━━━━━━━━━━━━━━━━
+
+所有 food_items 的：
+
+calories
+protein_g
+carbohydrate_g
+fat_g
+fiber_g
+sodium_mg
+
+加總後，
+應與 totals 大致一致。
+
+禁止前後數字互相矛盾。
+
+━━━━━━━━━━━━━━━━━━
+【9. 營養信心】
+━━━━━━━━━━━━━━━━━━
+
+nutrition_confidence 表示：
+「這項營養估算有多可靠」。
+
+它和第一層的圖片辨識 confidence 不完全相同。
+
+例如：
+
+AI 可能 99% 確定那是蛋餅，
+但不知道早餐店用了多少油。
+
+因此：
+
+food recognition confidence = 高
+nutrition confidence = 中高
+
+這是正常的。
+
+━━━━━━━━━━━━━━━━━━
+【10. 資料來源類型】
+━━━━━━━━━━━━━━━━━━
+
+目前第三層尚未連接正式食品資料庫。
+
+因此 nutrition_source 必須誠實標示：
+
+"ai_estimate"
+
+禁止假裝數值來自：
+政府資料庫
+品牌官方資料
+食品包裝營養標示
+
+未來系統接入正式資料來源後，
+才可以使用其他 source。
+
+━━━━━━━━━━━━━━━━━━
+【11. 不要在這層做人性化聊天】
+━━━━━━━━━━━━━━━━━━
+
+這層只負責可靠的營養資料。
+
+不要：
+
+- 毒舌
+- 稱讚
+- 評分
+- 減肥建議
+- 寫長篇文章
+
+朋友式回覆會由最後的呈現層負責。
+
+專業計算與人格必須分開。
+"""
+
+
+NUTRITION_SCHEMA = {
+    "type": "object",
+    "properties": {
+
+        "food_items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+
+                    "name": {
+                        "type": "string"
+                    },
+
+                    "quantity": {
+                        "type": "number"
+                    },
+
+                    "unit": {
+                        "type": "string"
+                    },
+
+                    "estimated_grams": {
+                        "type": [
+                            "number",
+                            "null"
+                        ]
+                    },
+
+                    "calories": {
+                        "type": "number"
+                    },
+
+                    "protein_g": {
+                        "type": "number"
+                    },
+
+                    "carbohydrate_g": {
+                        "type": "number"
+                    },
+
+                    "fat_g": {
+                        "type": "number"
+                    },
+
+                    "fiber_g": {
+                        "type": "number"
+                    },
+
+                    "sodium_mg": {
+                        "type": "number"
+                    },
+
+                    "nutrition_confidence": {
+                        "type": "number"
+                    },
+
+                    "nutrition_source": {
+                        "type": "string",
+                        "enum": [
+                            "ai_estimate"
+                        ]
+                    },
+
+                    "uncertainty_note": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+
+                "required": [
+                    "name",
+                    "quantity",
+                    "unit",
+                    "estimated_grams",
+                    "calories",
+                    "protein_g",
+                    "carbohydrate_g",
+                    "fat_g",
+                    "fiber_g",
+                    "sodium_mg",
+                    "nutrition_confidence",
+                    "nutrition_source",
+                    "uncertainty_note"
+                ],
+
+                "additionalProperties": False
+            }
+        },
+
+        "totals": {
+            "type": "object",
+            "properties": {
+
+                "calories": {
+                    "type": "number"
+                },
+
+                "protein_g": {
+                    "type": "number"
+                },
+
+                "carbohydrate_g": {
+                    "type": "number"
+                },
+
+                "fat_g": {
+                    "type": "number"
+                },
+
+                "fiber_g": {
+                    "type": "number"
+                },
+
+                "sodium_mg": {
+                    "type": "number"
+                }
+            },
+
+            "required": [
+                "calories",
+                "protein_g",
+                "carbohydrate_g",
+                "fat_g",
+                "fiber_g",
+                "sodium_mg"
+            ],
+
+            "additionalProperties": False
+        },
+
+        "overall_nutrition_confidence": {
+            "type": "number"
+        },
+
+        "overall_uncertainty_note": {
+            "type": [
+                "string",
+                "null"
+            ]
+        }
+    },
+
+    "required": [
+        "food_items",
+        "totals",
+        "overall_nutrition_confidence",
+        "overall_uncertainty_note"
+    ],
+
+    "additionalProperties": False
+}
+
+
+def estimate_nutrition(
+    vision_data,
+    recipe_data
+):
+    """
+    第一層 + 第二層
+    → 第三層營養估算
+    """
+
+    analysis_input = {
+        "vision": vision_data,
+        "recipe": recipe_data
+    }
+
+    response = client.responses.create(
+        model="gpt-5.6",
+
+        instructions=NUTRITION_PROMPT,
+
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "請根據以下資料估算營養：\n\n"
+                            + json.dumps(
+                                analysis_input,
+                                ensure_ascii=False
+                            )
+                        )
+                    }
+                ]
+            }
+        ],
+
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "nutrition_analysis",
+                "strict": True,
+                "schema": NUTRITION_SCHEMA
+            }
+        }
+    )
+
+    return json.loads(
+        response.output_text
+    )
+
