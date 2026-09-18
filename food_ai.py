@@ -292,3 +292,358 @@ def format_recognition_result(data):
             ])
 
     return "\n".join(lines)
+
+
+# =========================================================
+# 第二層：料理 / 原料理解
+# =========================================================
+
+RECIPE_PROMPT = """
+你是熟悉台灣飲食、外食、早餐店、便利商店、
+便當、自助餐與家常料理的料理結構分析系統。
+
+第一層視覺 AI 已經辨識出照片中的食物。
+你現在不需要重新看圖片，也不要推翻第一層的辨識。
+
+你的任務是：
+
+「理解這些食物本身是什麼，以及料理通常由哪些
+具有營養意義的主要成分組成。」
+
+━━━━━━━━━━━━━━━━━━
+【1. 單一食材不要亂拆】
+━━━━━━━━━━━━━━━━━━
+
+如果本身就是單一或接近單一食材，例如：
+
+水煮蛋
+香蕉
+地瓜
+白飯
+玉米
+雞胸肉
+鮭魚
+花椰菜
+豆腐
+毛豆
+
+直接保留這個食物。
+
+例如：
+
+水煮蛋
+→ 水煮蛋
+
+不要拆成：
+蛋白＋蛋黃
+
+香蕉
+→ 香蕉
+
+不要幻想其他成分。
+
+━━━━━━━━━━━━━━━━━━
+【2. 複合料理才拆解】
+━━━━━━━━━━━━━━━━━━
+
+如果是由多種食材組成的料理，
+理解其主要營養來源。
+
+例如：
+
+原味蛋餅
+→ 蛋餅皮
+→ 雞蛋
+→ 煎製用油
+
+起司蛋餅
+→ 蛋餅皮
+→ 雞蛋
+→ 起司
+→ 煎製用油
+
+鮪魚蛋餅
+→ 蛋餅皮
+→ 雞蛋
+→ 鮪魚
+→ 煎製用油
+→ 可能含少量美乃滋
+
+雞腿便當
+不能只理解成「一個雞腿便當」。
+
+如果第一層已辨識出：
+白飯、雞腿、高麗菜、豆干、滷蛋
+
+就應分別保留這些項目。
+
+━━━━━━━━━━━━━━━━━━
+【3. 區分確定與推定】
+━━━━━━━━━━━━━━━━━━
+
+ingredient_source 必須標示：
+
+"direct"
+= 第一層直接辨識到的食物，
+或該食物本身就是單一食材。
+
+"recipe"
+= 根據料理名稱，可以合理確定的基本組成。
+
+"possible"
+= 常見但不能確定一定存在的成分。
+
+例如鮪魚蛋餅：
+
+蛋餅皮 → recipe
+雞蛋 → recipe
+鮪魚 → recipe
+煎製用油 → recipe
+
+美乃滋 → possible
+
+不要把 possible 當成一定有。
+
+━━━━━━━━━━━━━━━━━━
+【4. 避免重複計算】
+━━━━━━━━━━━━━━━━━━
+
+這非常重要。
+
+如果第一層已經分別辨識：
+
+白飯
+雞腿
+高麗菜
+滷蛋
+
+不要第二層又額外新增：
+
+「雞腿便當」
+
+否則後續熱量會重複計算。
+
+同樣：
+
+如果第一層辨識：
+水煮蛋 × 2
+
+不要再另外新增：
+雞蛋 × 2
+
+保留「水煮蛋 × 2」即可。
+
+━━━━━━━━━━━━━━━━━━
+【5. 烹調方式】
+━━━━━━━━━━━━━━━━━━
+
+盡可能判斷或推定：
+
+boiled = 水煮
+steamed = 蒸
+grilled = 烤
+pan_fried = 煎
+stir_fried = 炒
+deep_fried = 油炸
+braised = 滷
+raw = 生食
+unknown = 無法判斷
+
+如果第一層名稱已經明確包含烹調方式：
+
+水煮蛋 → boiled
+炸雞 → deep_fried
+滷蛋 → braised
+
+直接使用。
+
+不要無根據亂猜。
+
+━━━━━━━━━━━━━━━━━━
+【6. 隱藏熱量來源】
+━━━━━━━━━━━━━━━━━━
+
+料理理解時要特別注意：
+
+食用油
+美乃滋
+沙拉醬
+奶油
+起司
+糖
+肉燥
+濃稠醬汁
+花生醬
+芝麻醬
+
+但只有：
+
+料理基本上必然需要
+或
+非常常見且具有營養影響
+
+才列入。
+
+不確定就標示 possible。
+
+━━━━━━━━━━━━━━━━━━
+【7. 台灣飲食情境】
+━━━━━━━━━━━━━━━━━━
+
+你應熟悉台灣常見料理的典型組成，
+但不能因為「通常如此」就假裝照片證明了它。
+
+料理知識是用來補充視覺辨識，
+不是取代視覺證據。
+
+━━━━━━━━━━━━━━━━━━
+【8. 這一層仍然不要算熱量】
+━━━━━━━━━━━━━━━━━━
+
+不要提供：
+
+kcal
+蛋白質
+碳水
+脂肪
+纖維
+鈉
+健康評分
+飲食建議
+
+第三層營養系統會負責。
+
+你的工作只有：
+
+「把食物理解正確，建立可供營養計算的料理結構。」
+"""
+
+
+RECIPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "original_name": {
+                        "type": "string"
+                    },
+                    "is_composite_dish": {
+                        "type": "boolean"
+                    },
+                    "cooking_method": {
+                        "type": "string",
+                        "enum": [
+                            "boiled",
+                            "steamed",
+                            "grilled",
+                            "pan_fried",
+                            "stir_fried",
+                            "deep_fried",
+                            "braised",
+                            "raw",
+                            "unknown"
+                        ]
+                    },
+                    "ingredients": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string"
+                                },
+                                "ingredient_source": {
+                                    "type": "string",
+                                    "enum": [
+                                        "direct",
+                                        "recipe",
+                                        "possible"
+                                    ]
+                                },
+                                "quantity_description": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ]
+                                }
+                            },
+                            "required": [
+                                "name",
+                                "ingredient_source",
+                                "quantity_description"
+                            ],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": [
+                    "original_name",
+                    "is_composite_dish",
+                    "cooking_method",
+                    "ingredients"
+                ],
+                "additionalProperties": False
+            }
+        }
+    },
+    "required": [
+        "items"
+    ],
+    "additionalProperties": False
+}
+
+
+def understand_recipes(vision_data):
+    """
+    第一層辨識結果 → 第二層料理結構
+    """
+
+    food_data = {
+        "foods": vision_data.get(
+            "foods",
+            []
+        )
+    }
+
+    response = client.responses.create(
+        model="gpt-5.6",
+
+        instructions=RECIPE_PROMPT,
+
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "以下是第一層視覺辨識結果：\n"
+                            + json.dumps(
+                                food_data,
+                                ensure_ascii=False
+                            )
+                            + "\n\n"
+                            "請進行料理與原料結構分析。"
+                        )
+                    }
+                ]
+            }
+        ],
+
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "recipe_understanding",
+                "strict": True,
+                "schema": RECIPE_SCHEMA
+            }
+        }
+    )
+
+    return json.loads(
+        response.output_text
+    )
+
