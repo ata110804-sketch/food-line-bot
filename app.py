@@ -230,7 +230,8 @@ def totals_to_dict(totals):
     }
 
 
-def compact_ai_text(text, max_lines=7, max_chars=420):
+def compact_ai_text(text, max_lines=16, max_chars=760):
+    """整理成 LINE 手機好讀格式；保留條列，不再只截前 7 行。"""
     if not text:
         return "我剛剛沒整理出答案，拜託再問我一次 😵‍💫"
 
@@ -238,14 +239,60 @@ def compact_ai_text(text, max_lines=7, max_chars=420):
     for mark in ["**", "###", "##", "#"]:
         cleaned = cleaned.replace(mark, "")
 
-    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    raw_lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    lines = []
+    for line in raw_lines:
+        # 統一常見 Markdown bullet，LINE 看起來比較乾淨。
+        line = re.sub(r"^[-*•]\s*", "・", line)
+        lines.append(line)
+
     result = "\n".join(lines[:max_lines])
-
     if len(result) > max_chars:
-        result = result[:max_chars].rstrip()
-        result += "\n\n想看更詳細的再叫我展開 😎"
-
+        result = result[:max_chars].rstrip(" ・、，。")
+        result += "…\n\n想看更詳細的再叫我展開 😎"
     return result
+
+
+def looks_like_explicit_meal_log(text):
+    """先抓明確『我吃了什麼』的陳述，避免被 AI 誤判成 today / advice。"""
+    t = re.sub(r"\s+", "", str(text or ""))
+    meal_marks = ["早餐", "早上", "午餐", "中午", "晚餐", "晚上", "點心", "宵夜"]
+    eat_marks = ["吃了", "吃", "喝了", "喝", "記錄", "紀錄", "幫我記", "記一下"]
+    question_marks = ["吃什麼", "可以吃", "能吃", "要吃", "推薦", "建議", "怎麼吃", "嗎", "?", "？"]
+
+    if any(q in t for q in question_marks):
+        return False
+    if not any(m in t for m in meal_marks):
+        return False
+    if not any(e in t for e in eat_marks):
+        return False
+
+    # 至少有一個餐別後面跟著「吃/喝」；多餐整天輸入尤其優先。
+    return bool(re.search(r"(早餐|早上|午餐|中午|晚餐|晚上|點心|宵夜).{0,6}(吃|喝)", t))
+
+
+def advice_request_for_line(user_text, intent):
+    """把 AI 輸出限制成適合 LINE 手機閱讀的短條列。"""
+    if intent == "exercise_advice":
+        format_rule = (
+            "請用繁體中文、LINE手機好讀格式回答。先用1句話說今天適合的強度，"
+            "再給『方案 A｜約20分鐘』與『方案 B｜約40分鐘』；"
+            "每個方案用『・』列2～4個動作，附時間/次數/組數。"
+            "最後最多1句提醒。不要寫長段落，不要Markdown表格，總長盡量350字內。"
+        )
+    elif intent == "meal_advice":
+        format_rule = (
+            "請用繁體中文、LINE手機好讀格式回答。先用1句話說今天飲食重點，"
+            "再給①②③三個可實際吃的組合；每組名稱獨立一行，食物用『・』逐項列出並附大約份量。"
+            "最後用👉給1句怎麼選。不要長篇說教，不要Markdown表格，總長盡量400字內。"
+        )
+    else:
+        format_rule = (
+            "請用繁體中文、LINE手機好讀格式回答：先直接回答重點，"
+            "需要列舉時用『・』條列，每段最多2～3行，最後最多1句提醒。"
+            "不要長篇說教，不要Markdown表格，總長盡量320字內。"
+        )
+    return f"使用者問題：{user_text}\n\n輸出規則：{format_rule}"
 
 
 # =========================================================
@@ -1391,13 +1438,17 @@ def rich_menu_smart_advice(user_id, mode):
             "我現在不知道下一餐吃什麼。請直接依照我的個人資料、減脂/維持/增肌目標、"
             "今天已吃的營養與今天剩餘額度，推薦 2～3 個實際可吃的下一餐組合。"
             "優先補不足的營養，不要讓已經偏高的項目繼續爆掉。"
-            "回答簡短好讀，每個組合列食物和大約份量即可。"
+            "請用LINE手機好讀格式：先1句飲食重點，再列①②③三個組合；"
+            "每組食物用『・』逐項列出並附大約份量，最後用👉給1句怎麼選。"
+            "不要長段落、不要表格，總長盡量400字內。"
         )
     else:
         prompt = (
             "請依照我的個人資料、目標和今天的飲食狀況，給我今天適合的運動建議。"
             "給 2 個選擇：一個約20分鐘、一個約40分鐘。"
-            "要寫運動內容、時間或組數，簡短直接，不要長篇說教。"
+            "請用LINE手機好讀格式：先1句今天適合的強度，再列『方案 A｜約20分鐘』"
+            "和『方案 B｜約40分鐘』；每個方案用『・』列動作與時間/次數/組數。"
+            "最後最多1句提醒。不要長篇說教、不要表格。"
             "如果資料不足，就給一般安全的中等強度方案，不要假裝知道我的傷病狀況。"
         )
 
@@ -1824,6 +1875,16 @@ def handle_text(event):
         intent_data = classify_user_text(text)
         intent = intent_data.get("intent")
 
+        # V5.4.2：明確的「早餐吃…午餐吃…晚餐吃…」是記錄，不是查詢。
+        # AI 偶爾會把整天飲食陳述誤判成 today，這裡用 deterministic rule 校正。
+        if looks_like_explicit_meal_log(text) and intent != "meal_log":
+            retry = classify_user_text(
+                "這是一則已經吃過的飲食紀錄，請拆成 meal_log；不要判成 today 或 meal_advice。原文：" + text
+            )
+            if retry.get("intent") == "meal_log" and retry.get("meals"):
+                intent_data = retry
+                intent = "meal_log"
+
         # -------------------------------------------------
         # V5.4 文字飲食紀錄：支援單餐 / 一次多餐
         # -------------------------------------------------
@@ -2078,7 +2139,7 @@ def handle_text(event):
             # 因此可以回答「還差多少蛋白質」、「已超多少熱量」、
             # 「晚餐怎麼配」以及「今天做什麼運動」。
             answer = food_chat(
-                text,
+                advice_request_for_line(text, intent),
                 get_profile(user_id),
                 totals_to_dict(get_today_totals(user_id)),
                 get_effective_targets(user_id),
