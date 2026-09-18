@@ -96,7 +96,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V5.2.1 is running!"
+    return "LINE Food AI Bot V5.3 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -1328,6 +1328,78 @@ def interaction_water_nudge(user_id):
 
 
 # =========================================================
+# V5.3 LINE Rich Menu
+# =========================================================
+
+def rich_menu_today_reply(user_id):
+    """今日進度：飲食剩餘額度 + 喝水進度一起看。"""
+    food = remaining_reply(user_id)
+    water = water_status_reply(user_id)
+    return f"📊 今日進度\n\n{food}\n\n────────────\n{water}"
+
+
+def rich_menu_food_entry_reply():
+    return (
+        "📸 記錄飲食\n\n"
+        "直接把這餐的照片傳給我就好，我會幫你辨識、估份量並記進今天帳本。\n\n"
+        "拍清楚一點，我比較不會把豆干認成肉🙂\n"
+        "如果份量或食物猜錯，直接跟我說：\n"
+        "「飯只有半碗」／「那是豆干不是肉」／「這杯我沒喝」"
+    )
+
+
+def rich_menu_water_reply(user_id):
+    return (
+        water_status_reply(user_id)
+        + "\n\n💧 快速記錄\n"
+          "直接傳：『喝了250ml』或『喝了500ml』\n"
+          "要改目標：『水目標改2000ml』\n\n"
+          "水不是看到就算喝，真的喝下去再記🙂"
+    )
+
+
+def rich_menu_more_reply():
+    return (
+        "☰ 更多功能\n\n"
+        "👤 我的資料　→ 傳「我的資料」\n"
+        "🎯 我的目標　→ 傳「我的目標」\n"
+        "⚖️ 記錄體重　→ 例「今天58.6kg」\n"
+        "📅 昨日紀錄　→ 傳「昨日紀錄」\n"
+        "🗓️ 月紀錄　→ 傳「月紀錄」\n"
+        "✏️ 修正上一餐 → 傳「我要修正上一餐」\n"
+        "🗑️ 刪除上一餐 → 傳「刪掉上一餐」\n"
+        "🧹 重置今天　→ 傳「重置今天」\n"
+        "❓ 完整說明　→ 傳「使用說明」\n\n"
+        "不用背啦，想做什麼直接跟我講也可以 😂"
+    )
+
+
+def rich_menu_smart_advice(user_id, mode):
+    profile = get_profile(user_id)
+    totals = totals_to_dict(get_today_totals(user_id))
+    targets = get_effective_targets(user_id)
+
+    if mode == "meal":
+        prompt = (
+            "我現在不知道下一餐吃什麼。請直接依照我的個人資料、減脂/維持/增肌目標、"
+            "今天已吃的營養與今天剩餘額度，推薦 2～3 個實際可吃的下一餐組合。"
+            "優先補不足的營養，不要讓已經偏高的項目繼續爆掉。"
+            "回答簡短好讀，每個組合列食物和大約份量即可。"
+        )
+    else:
+        prompt = (
+            "請依照我的個人資料、目標和今天的飲食狀況，給我今天適合的運動建議。"
+            "給 2 個選擇：一個約20分鐘、一個約40分鐘。"
+            "要寫運動內容、時間或組數，簡短直接，不要長篇說教。"
+            "如果資料不足，就給一般安全的中等強度方案，不要假裝知道我的傷病狀況。"
+        )
+
+    answer = food_chat(prompt, profile, totals, targets)
+    title = "🍱 今天吃什麼" if mode == "meal" else "🏃 今天動什麼"
+    return title + "\n\n" + compact_ai_text(answer)
+
+
+# =========================================================
 # 文字訊息
 # =========================================================
 
@@ -1339,6 +1411,35 @@ def handle_text(event):
     try:
         current_profile = get_profile(user_id)
         maybe_push_yesterday_summary(user_id)
+
+        # -------------------------------------------------
+        # V5.3 LINE Rich Menu 六大入口
+        # 必須放在一般聊天 / AI 判斷之前，避免選單文字被誤判。
+        # -------------------------------------------------
+
+        if text == "記錄飲食":
+            reply_text(event.reply_token, rich_menu_food_entry_reply())
+            return
+
+        if text == "今日進度":
+            reply_text(event.reply_token, rich_menu_today_reply(user_id))
+            return
+
+        if text == "吃什麼":
+            reply_text(event.reply_token, rich_menu_smart_advice(user_id, "meal"))
+            return
+
+        if text == "喝水":
+            reply_text(event.reply_token, rich_menu_water_reply(user_id))
+            return
+
+        if text == "運動建議":
+            reply_text(event.reply_token, rich_menu_smart_advice(user_id, "exercise"))
+            return
+
+        if text == "更多功能":
+            reply_text(event.reply_token, rich_menu_more_reply())
+            return
 
         # -------------------------------------------------
         # 日常互動：嗨／早安／晚安／謝謝
