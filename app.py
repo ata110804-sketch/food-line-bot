@@ -26,6 +26,7 @@ from linebot.v3.webhooks import (
     TextMessageContent,
     ImageMessageContent,
     StickerMessageContent,
+    PostbackEvent,
 )
 
 import food_ai as _food_ai
@@ -93,6 +94,14 @@ from database import (
     should_show_yesterday_summary,
     mark_yesterday_summary_shown,
     get_yesterday_snapshot,
+    save_exercise,
+    get_exercise_by_date,
+    get_exercise_totals,
+    save_exercise_plan,
+    get_latest_exercise_plan,
+    mark_exercise_plan,
+    get_exercise_range,
+    get_unfinished_exercise_plans,
 )
 
 
@@ -117,7 +126,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V5.5 is running!"
+    return "LINE Food AI Bot V5.6 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -1495,6 +1504,139 @@ def rich_menu_more_reply():
     )
 
 
+
+# =========================================================
+# V5.6：互動式運動中心（短、直覺、可追蹤）
+# =========================================================
+EXERCISE_PLANS = {
+ "A":{"title":"20 分鐘｜輕鬆保底","minutes":20,"met":4.0,"muscles":"核心・臀部・背部","items":[
+  ("死蟲 Dead Bug","3組 × 10下","核心・腹橫肌"),("鳥狗 Bird Dog","2組 × 8下／邊","核心・下背・臀部"),("臀橋 Glute Bridge","3組 × 12下","臀大肌・腿後側"),("彈力帶／滑輪划船","3組 × 12下","背部・二頭肌")]},
+ "B":{"title":"45–60 分鐘｜健身房主力","minutes":50,"met":5.5,"muscles":"臀腿・核心・背部","items":[
+  ("深蹲／史密斯深蹲","4組 × 5–8下","臀部・大腿前側・核心"),("羅馬尼亞硬舉","4組 × 6–10下","臀部・腿後側"),("腿推","3組 × 8–12下","臀腿"),("腿屈伸","3組 × 10–15下","大腿前側"),("腿後勾","3組 × 10–15下","腿後側")]},
+ "C":{"title":"25–30 分鐘｜健身房簡單版","minutes":28,"met":4.5,"muscles":"全身・臀腿・背部","items":[
+  ("腿推","3組 × 10下","臀腿"),("坐姿划船","3組 × 10下","背部・二頭肌"),("臀橋／臀推","3組 × 12下","臀部・腿後側"),("核心抗旋轉","2組 × 10下／邊","核心")]},
+ "D":{"title":"15–20 分鐘｜低衝擊版","minutes":18,"met":3.0,"muscles":"核心・臀部・上半身","items":[
+  ("死蟲","2組 × 8下／邊","核心"),("臀橋","3組 × 12下","臀部"),("坐姿划船","3組 × 12下","背部"),("舒適範圍活動","5分鐘","全身放鬆")]},
+}
+
+def _weight_for_exercise(user_id):
+    p=get_profile(user_id) or {}; return float(p.get("weight_kg") or 60)
+
+def _cal_range(user_id, minutes, met):
+    w=_weight_for_exercise(user_id); mid=met*3.5*w/200*minutes
+    return max(1,round(mid*.8)), max(2,round(mid*1.2))
+
+def _postback_button(label,data,style="secondary"):
+    return {"type":"button","style":style,"height":"sm","action":{"type":"postback","label":label,"data":data,"displayText":label}}
+
+def exercise_choice_flex(user_id):
+    cards=[]
+    for code in ["A","B","C","D"]:
+        p=EXERCISE_PLANS[code]; lo,hi=_cal_range(user_id,p["minutes"],p["met"])
+        cards.append({"type":"bubble","size":"kilo","body":{"type":"box","layout":"vertical","spacing":"md","contents":[
+          {"type":"text","text":f"{code}｜{p['title']}","weight":"bold","size":"lg","wrap":True},
+          {"type":"text","text":f"🎯 {p['muscles']}","size":"sm","wrap":True,"color":"#555555"},
+          {"type":"text","text":f"🔥 約 {lo}–{hi} kcal","size":"sm","color":"#555555"}]},
+          "footer":{"type":"box","layout":"vertical","contents":[_postback_button("看這套",f"ex:show:{code}","primary")]}})
+    return FlexMessage(alt_text="🏃 今天的運動方案",contents=FlexContainer.from_dict({"type":"carousel","contents":cards}))
+
+def exercise_plan_flex(user_id, code):
+    p=EXERCISE_PLANS.get(code,EXERCISE_PLANS["A"]); lo,hi=_cal_range(user_id,p["minutes"],p["met"])
+    row=save_exercise_plan(user_id,code,p["title"],p["minutes"],lo,hi,p["muscles"],[{"name":a,"sets":b,"muscles":c} for a,b,c in p["items"]])
+    contents=[{"type":"text","text":f"🏋️ {p['title']}","weight":"bold","size":"xl","wrap":True},
+      {"type":"text","text":f"🎯 {p['muscles']}   🔥 約 {lo}–{hi} kcal","size":"sm","wrap":True,"color":"#555555"},{"type":"separator","margin":"md"}]
+    for i,(name,sets,muscles) in enumerate(p["items"],1):
+        contents += [{"type":"text","text":f"{i}  {name}","weight":"bold","margin":"md","wrap":True},
+                     {"type":"text","text":f"{sets}｜{muscles}","size":"sm","wrap":True,"color":"#666666"}]
+    footer=[_postback_button("▶️ 開始這套",f"ex:start:{row['id']}","primary"),
+            _postback_button("✅ 完成訓練",f"ex:done:{row['id']}","primary"),
+            _postback_button("🌓 只做一部分",f"ex:partial:{row['id']}"),
+            _postback_button("🔄 看其他方案","ex:choices")]
+    return FlexMessage(alt_text=f"🏋️ {p['title']}",contents=FlexContainer.from_dict({"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":contents},"footer":{"type":"box","layout":"vertical","spacing":"sm","contents":footer}}))
+
+def _finish_plan(user_id, plan_id, ratio=1.0):
+    row=mark_exercise_plan(user_id,plan_id,'completed' if ratio>=.99 else 'partial',ratio)
+    if not row: return "找不到這份訓練紀錄。"
+    kcal=round(((float(row.get('calories_low') or 0)+float(row.get('calories_high') or 0))/2)*ratio)
+    mins=max(1,round(float(row.get('duration_minutes') or 0)*ratio))
+    save_exercise(user_id,row.get('title') or '運動',mins,kcal,'中等',f"方案 {row.get('plan_code')}；完成 {round(ratio*100)}%",row.get('plan_date'))
+    return f"✅ 收工，記下來了！\n⏱ {mins} 分鐘　🔥 約 {kcal} kcal\n🎯 {row.get('muscle_groups') or '全身'}\n今天有交作業，可以 😎"
+
+def _date_from_text(text):
+    from datetime import timedelta
+    now=datetime.now(TAIWAN_TZ).date()
+    if '前天' in text: return now-timedelta(days=2)
+    if '昨天' in text or '昨日' in text: return now-timedelta(days=1)
+    return now
+
+def _parse_exercise_log(text):
+    compact=re.sub(r"\s+","",text)
+    if not any(k in compact for k in ['運動','健身','走路','快走','跑步','游泳','騎車','腳踏車','深蹲','臀橋','重訓','瑜珈','有氧','練腿','練背','練胸']): return None
+    if any(k in compact for k in ['建議','推薦','做什麼','菜單','怎麼練','可以做']): return None
+    m=re.search(r'(\d+(?:\.\d+)?)\s*(小時|分鐘|分)',text)
+    minutes=None
+    if m: minutes=float(m.group(1))*(60 if m.group(2)=='小時' else 1)
+    if not minutes: return None
+    kind=next((k for k in ['健身','快走','走路','跑步','游泳','騎車','腳踏車','深蹲','臀橋','重訓','瑜珈','有氧','練腿','練背','練胸'] if k in compact),'運動')
+    return kind,minutes
+
+def _exercise_history_reply(user_id,text):
+    from datetime import timedelta
+    today=datetime.now(TAIWAN_TZ).date()
+    if '這週' in text or '本週' in text: start=today-timedelta(days=today.weekday()); end=today
+    elif '上週' in text: end=today-timedelta(days=today.weekday()+1); start=end-timedelta(days=6)
+    elif '這個月' in text or '本月' in text: start=today.replace(day=1); end=today
+    else: start=end=_date_from_text(text)
+    rows=get_exercise_range(user_id,start,end)
+    if not rows:
+        pending=get_unfinished_exercise_plans(user_id,7)
+        extra="\n👀 不過最近有排過方案、還沒確認完成。可以回我「昨天有做」補登。" if pending else ""
+        return f"📊 {start.strftime('%m/%d')}～{end.strftime('%m/%d')} 沒有已確認的運動紀錄。{extra}"
+    mins=sum(float(r.get('duration_minutes') or 0) for r in rows); kcal=sum(float(r.get('calories_burned') or 0) for r in rows)
+    lines=[f"📊 運動戰報｜{start.strftime('%m/%d')}～{end.strftime('%m/%d')}",f"🏃 {len(rows)} 次　⏱ {round(mins)} 分　🔥 約 {round(kcal)} kcal",""]
+    for r in rows[:6]: lines.append(f"・{r['log_date'].strftime('%m/%d')} {r['exercise_type']}｜{round(float(r.get('duration_minutes') or 0))}分・約{round(float(r.get('calories_burned') or 0))}kcal")
+    return "\n".join(lines)
+
+def handle_exercise_text_v56(event,user_id,text):
+    compact=re.sub(r"\s+","",text)
+    if any(k in compact for k in ['有運動嗎','運動幾次','運動多久','消耗多少','運動紀錄','運動戰報','這週運動','本週運動','上週運動','這個月運動','本月運動']):
+        reply_text(event.reply_token,_exercise_history_reply(user_id,text)); return True
+    if any(k in compact for k in ['運動建議','健身房菜單','健身菜單','今天練什麼','今天做什麼運動']):
+        reply_messages(event.reply_token,[exercise_choice_flex(user_id)]); return True
+    parsed=_parse_exercise_log(text)
+    if parsed:
+        kind,mins=parsed; met={'走路':3.3,'快走':4.3,'跑步':7.5,'游泳':6.0,'騎車':5.5,'腳踏車':5.5,'瑜珈':2.8}.get(kind,5.0)
+        lo,hi=_cal_range(user_id,mins,met); kcal=round((lo+hi)/2); d=_date_from_text(text)
+        save_exercise(user_id,kind,mins,kcal,'中等','自然語言補登',d)
+        reply_text(event.reply_token,f"✅ 補登完成｜{d.strftime('%m/%d')}\n🏃 {kind}　⏱ {round(mins)} 分\n🔥 約 {kcal} kcal\n有做就算數，沒有漏掉 😎"); return True
+    if any(k in compact for k in ['昨天有做','前天有做','那套做完','剛剛那套做完']):
+        d=_date_from_text(text); row=get_latest_exercise_plan(user_id,target_date=d)
+        if row: reply_text(event.reply_token,_finish_plan(user_id,row['id'],1.0)); return True
+    return False
+
+@handler.add(PostbackEvent)
+def handle_postback_v56(event):
+    user_id=get_user_id(event); data=getattr(event.postback,'data','') or ''
+    try:
+        if data=='ex:choices': reply_messages(event.reply_token,[exercise_choice_flex(user_id)]); return
+        m=re.match(r'ex:show:([A-D])$',data)
+        if m: reply_messages(event.reply_token,[exercise_plan_flex(user_id,m.group(1))]); return
+        m=re.match(r'ex:start:(\d+)$',data)
+        if m:
+            row=mark_exercise_plan(user_id,int(m.group(1)),'started',0)
+            reply_text(event.reply_token,f"▶️ 開始！{row.get('title') if row else '今天這套'}\n照順序做就好，不用一次看一大坨文字 💪"); return
+        m=re.match(r'ex:done:(\d+)$',data)
+        if m: reply_text(event.reply_token,_finish_plan(user_id,int(m.group(1)),1.0)); return
+        m=re.match(r'ex:partial:(\d+)$',data)
+        if m:
+            pid=m.group(1)
+            flex={"type":"bubble","body":{"type":"box","layout":"vertical","contents":[{"type":"text","text":"🌓 今天做到多少？","weight":"bold","size":"xl"},{"type":"text","text":"不用硬湊100%，有做就記。","margin":"md","color":"#666666"}]},"footer":{"type":"box","layout":"vertical","spacing":"sm","contents":[_postback_button("大約 75%",f"ex:pct:{pid}:75","primary"),_postback_button("大約 50%",f"ex:pct:{pid}:50"),_postback_button("大約 25%",f"ex:pct:{pid}:25")]}}
+            reply_messages(event.reply_token,[FlexMessage(alt_text='🌓 選擇完成程度',contents=FlexContainer.from_dict(flex))]); return
+        m=re.match(r'ex:pct:(\d+):(25|50|75)$',data)
+        if m: reply_text(event.reply_token,_finish_plan(user_id,int(m.group(1)),int(m.group(2))/100)); return
+    except Exception as e:
+        print('POSTBACK_V56_ERROR',repr(e),flush=True); reply_text(event.reply_token,'🥲 剛剛按鈕卡了一下，再按一次就好。')
+
 def rich_menu_smart_advice(user_id, mode):
     profile = get_profile(user_id)
     totals = totals_to_dict(get_today_totals(user_id))
@@ -1559,11 +1701,17 @@ def handle_text(event):
             return
 
         if text == "運動建議":
-            reply_text(event.reply_token, rich_menu_smart_advice(user_id, "exercise"))
+            reply_messages(event.reply_token, [exercise_choice_flex(user_id)])
             return
 
         if text == "更多功能":
             reply_text(event.reply_token, rich_menu_more_reply())
+            return
+
+        # -------------------------------------------------
+        # V5.6 運動：查詢 / 補登 / 建議（不碰 V5.5 飲食路由）
+        # -------------------------------------------------
+        if handle_exercise_text_v56(event, user_id, text):
             return
 
         # -------------------------------------------------
