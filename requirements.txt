@@ -3,3 +3,4 @@ line-bot-sdk
 gunicorn
 openai
 requests
+psycopg2-binary
