@@ -2,6 +2,7 @@ import os
 import base64
 import io
 import re
+import random
 import requests
 
 from datetime import datetime
@@ -24,6 +25,7 @@ from linebot.v3.webhooks import (
     MessageEvent,
     TextMessageContent,
     ImageMessageContent,
+    StickerMessageContent,
 )
 
 from food_ai import (
@@ -118,6 +120,72 @@ def reply_text(reply_token, text):
 
 def get_user_id(event):
     return getattr(event.source, "user_id", None) or "unknown_user"
+
+
+def start_loading(user_id, seconds=60):
+    """LINE 一對一聊天室顯示處理中動畫；失敗時不影響主要流程。"""
+    if not user_id or user_id == "unknown_user":
+        return False
+
+    try:
+        response = requests.post(
+            "https://api.line.me/v2/bot/chat/loading/start",
+            headers={
+                "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "chatId": user_id,
+                "loadingSeconds": seconds,
+            },
+            timeout=5,
+        )
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        print("LOADING_ANIMATION_ERROR:", repr(e), flush=True)
+        return False
+
+
+def social_reply(text):
+    raw = str(text or "").strip()
+    lower = raw.lower()
+
+    greetings = [
+        "嗨", "嗨嗨", "哈囉", "哈啰", "hello", "hi", "hey",
+        "安安", "你好", "在嗎", "在嘛", "有人嗎",
+    ]
+
+    if lower in greetings:
+        return random.choice([
+            "嗨 👋 我在。吃東西就拍給我，別等晚上才來問今天是不是吃爆了🙂",
+            "有～我在 😎 今天吃了什麼就丟過來，我幫你記。",
+            "哈囉 👋 今天也要記得顧一下熱量跟蛋白質，不准裝沒看到。",
+            "在啦 😂 要記飲食、看今天剩多少，還是想找東西吃？",
+        ])
+
+    if any(word in raw for word in ["早安", "早ㄤ", "早上好"]):
+        return random.choice([
+            "早安 ☀️ 新的一天重新算，早餐吃了記得拍給我。",
+            "早～☀️ 昨天不管吃怎樣今天都正常吃，別搞絕食補償。早餐交出來🙂",
+            "早安 👋 今天的帳本是乾淨的，拜託不要第一餐就直接炸掉 😂",
+        ])
+
+    if any(word in raw for word in ["晚安", "睡了", "要睡了"]):
+        return random.choice([
+            "晚安 😴 今天結束就別再巡冰箱了🙂 明天繼續。",
+            "去睡 😂 睡眠也很重要，宵夜先不要偷偷加戲。",
+            "晚安～今天有記錄就很可以，明天再繼續 📊",
+        ])
+
+    if raw in ["謝謝", "感謝", "謝啦", "3q", "thanks", "thank you"]:
+        return random.choice([
+            "不客氣 😎 記得真的照做，不是看完建議就算完成喔。",
+            "可以～有吃東西再丟給我 📸",
+            "免客氣，下一餐繼續交作業🙂",
+        ])
+
+    return None
 
 
 # =========================================================
@@ -1012,6 +1080,15 @@ def handle_text(event):
         current_profile = get_profile(user_id)
 
         # -------------------------------------------------
+        # 日常互動：嗨／早安／晚安／謝謝
+        # -------------------------------------------------
+
+        casual = social_reply(text)
+        if casual:
+            reply_text(event.reply_token, casual)
+            return
+
+        # -------------------------------------------------
         # 快速查詢
         # -------------------------------------------------
 
@@ -1470,12 +1547,31 @@ def handle_text(event):
 
 
 # =========================================================
+# 貼圖訊息
+# =========================================================
+
+@handler.add(MessageEvent, message=StickerMessageContent)
+def handle_sticker(event):
+    replies = [
+        "收到你的貼圖了 😂 有吃東西的話照片也一起交出來。",
+        "貼圖很會喔🙂 今天飲食有乖乖記嗎？",
+        "好啦有看到 😂 要查今天進度就跟我說「今天還能吃多少」。",
+        "我也想回你一張，但先把正事顧好 😎 吃飯記得拍。",
+        "可以，這張我收下 😂 今天要吃什麼也可以直接問我。",
+    ]
+    reply_text(event.reply_token, random.choice(replies))
+
+
+# =========================================================
 # 圖片訊息
 # =========================================================
 
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event):
     user_id = get_user_id(event)
+
+    # 先讓使用者知道 BOT 有收到照片。LINE 新訊息送出時動畫會自動消失。
+    start_loading(user_id, 60)
 
     try:
         message_id = event.message.id
@@ -1534,9 +1630,10 @@ def handle_image(event):
         reply_text(
             event.reply_token,
             (
-                "🥲 這餐分析翻車了。\n"
-                "再傳一次給我。\n\n"
-                "如果連續翻車，我們就去 Render 抓兇手 😂"
+                "⚠️ 這張照片沒有成功分析。\n"
+                "這次沒有記進今天的飲食帳本，不用自己刪除。\n\n"
+                "再傳一次給我就好 📸\n"
+                "如果連續失敗，我們再去 Render 抓兇手 😂"
             ),
         )
 
