@@ -1441,11 +1441,19 @@ def handle_text(event):
             )
             return
 
-        if intent in ["meal_advice", "food_question"]:
+        # -------------------------------------------------
+        # V5 智能飲食 / 菜單 / 運動建議
+        # -------------------------------------------------
+
+        if intent in ["meal_advice", "food_question", "exercise_advice"]:
+            # V5 會同時讀：個人資料、今天已吃、今天真正生效的營養目標。
+            # 因此可以回答「還差多少蛋白質」、「已超多少熱量」、
+            # 「晚餐怎麼配」以及「今天做什麼運動」。
             answer = food_chat(
                 text,
                 get_profile(user_id),
                 totals_to_dict(get_today_totals(user_id)),
+                get_effective_targets(user_id),
             )
             reply_text(event.reply_token, compact_ai_text(answer))
             return
