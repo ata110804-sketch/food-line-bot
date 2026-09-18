@@ -3,7 +3,7 @@ import json
 import psycopg2
 
 from psycopg2.extras import RealDictCursor
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 
@@ -12,7 +12,6 @@ from zoneinfo import ZoneInfo
 # =========================================================
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 
 
@@ -21,7 +20,6 @@ TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 # =========================================================
 
 def get_connection():
-
     return psycopg2.connect(
         DATABASE_URL,
         cursor_factory=RealDictCursor
@@ -29,7 +27,7 @@ def get_connection():
 
 
 # =========================================================
-# 初始化資料庫
+# 初始化資料庫 V4
 # =========================================================
 
 def init_database():
@@ -40,9 +38,9 @@ def init_database():
 
         with conn.cursor() as cursor:
 
-            # -------------------------------------------------
+            # =================================================
             # 餐點紀錄
-            # -------------------------------------------------
+            # =================================================
 
             cursor.execute(
                 """
@@ -53,35 +51,26 @@ def init_database():
                     user_id TEXT NOT NULL,
 
                     meal_date DATE NOT NULL,
-
                     meal_time TIMESTAMPTZ NOT NULL,
 
                     meal_type TEXT,
-
                     meal_name TEXT,
 
                     foods JSONB NOT NULL,
 
                     calories DOUBLE PRECISION DEFAULT 0,
-
                     protein DOUBLE PRECISION DEFAULT 0,
-
                     carbs DOUBLE PRECISION DEFAULT 0,
-
                     fat DOUBLE PRECISION DEFAULT 0,
-
                     fiber DOUBLE PRECISION DEFAULT 0,
-
                     sodium DOUBLE PRECISION DEFAULT 0,
 
                     ai_confidence TEXT,
-
                     ai_comment TEXT,
 
                     corrected BOOLEAN DEFAULT FALSE,
 
                     created_at TIMESTAMPTZ DEFAULT NOW(),
-
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
                 """
@@ -95,13 +84,9 @@ def init_database():
                 """
             )
 
-
-            # -------------------------------------------------
-            # V3：個人資料
-            #
-            # 所有欄位都允許暫時為 NULL
-            # 所以使用者可以分次填資料
-            # -------------------------------------------------
+            # =================================================
+            # 個人資料
+            # =================================================
 
             cursor.execute(
                 """
@@ -110,45 +95,156 @@ def init_database():
                     user_id TEXT PRIMARY KEY,
 
                     height_cm DOUBLE PRECISION,
-
                     weight_kg DOUBLE PRECISION,
-
                     age INTEGER,
-
                     sex TEXT,
 
                     activity_level TEXT,
-
                     goal TEXT,
 
                     bmr DOUBLE PRECISION,
-
                     tdee DOUBLE PRECISION,
 
                     calorie_target DOUBLE PRECISION,
-
                     protein_target DOUBLE PRECISION,
-
                     carbs_target DOUBLE PRECISION,
-
                     fat_target DOUBLE PRECISION,
+                    fiber_target DOUBLE PRECISION DEFAULT 25,
 
-                    fiber_target DOUBLE PRECISION
-                        DEFAULT 25,
+                    inbody JSONB DEFAULT '{}'::jsonb,
 
-                    inbody JSONB
-                        DEFAULT '{}'::jsonb,
-
-                    updated_at TIMESTAMPTZ
-                        DEFAULT NOW()
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
                 """
             )
 
+            # =================================================
+            # V4：加入自訂目標欄位
+            # 舊資料庫也可以直接升級
+            # =================================================
 
-            # -------------------------------------------------
+            cursor.execute(
+                """
+                ALTER TABLE user_profiles
+                ADD COLUMN IF NOT EXISTS
+                custom_calorie_target DOUBLE PRECISION;
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE user_profiles
+                ADD COLUMN IF NOT EXISTS
+                custom_protein_target DOUBLE PRECISION;
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE user_profiles
+                ADD COLUMN IF NOT EXISTS
+                custom_carbs_target DOUBLE PRECISION;
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE user_profiles
+                ADD COLUMN IF NOT EXISTS
+                custom_fat_target DOUBLE PRECISION;
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE user_profiles
+                ADD COLUMN IF NOT EXISTS
+                custom_fiber_target DOUBLE PRECISION;
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE user_profiles
+                ADD COLUMN IF NOT EXISTS
+                use_custom_targets BOOLEAN DEFAULT FALSE;
+                """
+            )
+
+            # =================================================
+            # V4：單日營養目標
+            #
+            # 用途：
+            # 今天低碳、明天恢復正常
+            # 不需要一直修改永久個人資料
+            # =================================================
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_targets (
+
+                    id SERIAL PRIMARY KEY,
+
+                    user_id TEXT NOT NULL,
+                    target_date DATE NOT NULL,
+
+                    calorie_target DOUBLE PRECISION,
+                    protein_target DOUBLE PRECISION,
+                    carbs_target DOUBLE PRECISION,
+                    fat_target DOUBLE PRECISION,
+                    fiber_target DOUBLE PRECISION,
+
+                    mode_name TEXT,
+
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+                    UNIQUE(user_id, target_date)
+                );
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_daily_targets_user_date
+                ON daily_targets(user_id, target_date);
+                """
+            )
+
+            # =================================================
+            # V4：體重歷史
+            # =================================================
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS weight_logs (
+
+                    id SERIAL PRIMARY KEY,
+
+                    user_id TEXT NOT NULL,
+                    log_date DATE NOT NULL,
+                    weight_kg DOUBLE PRECISION NOT NULL,
+
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+                    UNIQUE(user_id, log_date)
+                );
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_weight_logs_user_date
+                ON weight_logs(user_id, log_date);
+                """
+            )
+
+            # =================================================
             # 食物記憶
-            # -------------------------------------------------
+            # =================================================
 
             cursor.execute(
                 """
@@ -159,20 +255,14 @@ def init_database():
                     user_id TEXT NOT NULL,
 
                     memory_text TEXT NOT NULL,
-
                     food_name TEXT,
 
-                    data JSONB
-                        DEFAULT '{}'::jsonb,
+                    data JSONB DEFAULT '{}'::jsonb,
 
-                    use_count INTEGER
-                        DEFAULT 1,
+                    use_count INTEGER DEFAULT 1,
 
-                    created_at TIMESTAMPTZ
-                        DEFAULT NOW(),
-
-                    updated_at TIMESTAMPTZ
-                        DEFAULT NOW()
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
                 """
             )
@@ -191,39 +281,80 @@ def init_database():
         conn.commit()
 
         print(
-            "DATABASE_V3_READY",
+            "DATABASE_V4_READY",
             flush=True
         )
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# 自動判斷早餐 / 午餐 / 晚餐 / 點心
+# 日期工具
+# =========================================================
+
+def taiwan_now():
+    return datetime.now(TAIWAN_TZ)
+
+
+def taiwan_today():
+    return taiwan_now().date()
+
+
+def normalize_date(value=None):
+
+    if value is None:
+        return taiwan_today()
+
+    if isinstance(value, datetime):
+        return value.astimezone(TAIWAN_TZ).date()
+
+    if isinstance(value, date):
+        return value
+
+    if isinstance(value, str):
+
+        text = value.strip()
+
+        if text in ["今天", "今日"]:
+            return taiwan_today()
+
+        if text in ["昨天", "昨日"]:
+            return taiwan_today() - timedelta(days=1)
+
+        if text in ["前天"]:
+            return taiwan_today() - timedelta(days=2)
+
+        try:
+            return datetime.strptime(
+                text,
+                "%Y-%m-%d"
+            ).date()
+
+        except Exception:
+            pass
+
+    return taiwan_today()
+
+
+# =========================================================
+# 自動判斷餐別
 # =========================================================
 
 def guess_meal_type(now=None):
 
     if now is None:
-
-        now = datetime.now(
-            TAIWAN_TZ
-        )
+        now = taiwan_now()
 
     hour = now.hour
 
     if 5 <= hour < 11:
-
         return "早餐"
 
     if 11 <= hour < 15:
-
         return "午餐"
 
     if 17 <= hour < 22:
-
         return "晚餐"
 
     return "點心"
@@ -235,20 +366,26 @@ def guess_meal_type(now=None):
 
 def save_meal(
     user_id,
-    data
+    data,
+    meal_date=None,
+    meal_type=None
 ):
 
-    now = datetime.now(
-        TAIWAN_TZ
+    now = taiwan_now()
+
+    target_date = normalize_date(
+        meal_date
+        or data.get("meal_date")
     )
 
     total = data.get(
         "total",
         {}
-    )
+    ) or {}
 
-    meal_type = (
-        data.get("meal_type")
+    final_meal_type = (
+        meal_type
+        or data.get("meal_type")
         or guess_meal_type(now)
     )
 
@@ -265,8 +402,10 @@ def save_meal(
                     user_id,
                     meal_date,
                     meal_time,
+
                     meal_type,
                     meal_name,
+
                     foods,
 
                     calories,
@@ -285,8 +424,10 @@ def save_meal(
                     %s,
                     %s,
                     %s,
+
                     %s,
                     %s,
+
                     %s::jsonb,
 
                     %s,
@@ -305,12 +446,10 @@ def save_meal(
 
                 (
                     user_id,
-
-                    now.date(),
-
+                    target_date,
                     now,
 
-                    meal_type,
+                    final_meal_type,
 
                     data.get(
                         "meal_name",
@@ -355,13 +494,8 @@ def save_meal(
                         0
                     ),
 
-                    data.get(
-                        "confidence"
-                    ),
-
-                    data.get(
-                        "comment"
-                    )
+                    data.get("confidence"),
+                    data.get("comment")
                 )
             )
 
@@ -372,12 +506,11 @@ def save_meal(
         return result["id"]
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# 取得指定餐點
+# 取得單一餐點
 # =========================================================
 
 def get_meal(
@@ -425,7 +558,6 @@ def get_meal(
             return cursor.fetchone()
 
     finally:
-
         conn.close()
 
 
@@ -448,7 +580,9 @@ def get_last_meal(user_id):
 
                 WHERE user_id = %s
 
-                ORDER BY meal_time DESC
+                ORDER BY
+                    meal_date DESC,
+                    meal_time DESC
 
                 LIMIT 1;
                 """,
@@ -460,12 +594,11 @@ def get_last_meal(user_id):
             return cursor.fetchone()
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# 更新餐點
+# 更新餐點內容
 # =========================================================
 
 def update_meal(
@@ -476,7 +609,7 @@ def update_meal(
     total = data.get(
         "total",
         {}
-    )
+    ) or {}
 
     conn = get_connection()
 
@@ -489,29 +622,20 @@ def update_meal(
                 UPDATE meals
 
                 SET
-
                     meal_name = %s,
-
                     foods = %s::jsonb,
 
                     calories = %s,
-
                     protein = %s,
-
                     carbs = %s,
-
                     fat = %s,
-
                     fiber = %s,
-
                     sodium = %s,
 
                     ai_confidence = %s,
-
                     ai_comment = %s,
 
                     corrected = TRUE,
-
                     updated_at = NOW()
 
                 WHERE id = %s;
@@ -576,12 +700,119 @@ def update_meal(
         conn.commit()
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# 刪除餐點
+# V4：修改餐別
+# =========================================================
+
+def update_meal_type(
+    meal_id,
+    user_id,
+    meal_type
+):
+
+    valid_types = {
+        "早餐",
+        "午餐",
+        "晚餐",
+        "點心"
+    }
+
+    if meal_type not in valid_types:
+        return False
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                UPDATE meals
+
+                SET
+                    meal_type = %s,
+                    updated_at = NOW()
+
+                WHERE
+                    id = %s
+                    AND user_id = %s
+
+                RETURNING id;
+                """,
+                (
+                    meal_type,
+                    meal_id,
+                    user_id
+                )
+            )
+
+            result = cursor.fetchone()
+
+        conn.commit()
+
+        return bool(result)
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V4：修改餐點日期
+# =========================================================
+
+def update_meal_date(
+    meal_id,
+    user_id,
+    meal_date
+):
+
+    target_date = normalize_date(
+        meal_date
+    )
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                UPDATE meals
+
+                SET
+                    meal_date = %s,
+                    updated_at = NOW()
+
+                WHERE
+                    id = %s
+                    AND user_id = %s
+
+                RETURNING id;
+                """,
+                (
+                    target_date,
+                    meal_id,
+                    user_id
+                )
+            )
+
+            result = cursor.fetchone()
+
+        conn.commit()
+
+        return bool(result)
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# 刪除單一餐點
 # =========================================================
 
 def delete_meal(
@@ -605,7 +836,6 @@ def delete_meal(
 
                 RETURNING id;
                 """,
-
                 (
                     meal_id,
                     user_id
@@ -619,19 +849,79 @@ def delete_meal(
         return bool(result)
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# 取得今天所有餐點
+# V4：重置指定日期
+#
+# 只刪餐點！
+# 不刪個人資料
+# 不刪食物記憶
+# 不刪體重
 # =========================================================
 
-def get_today_meals(user_id):
+def reset_day(
+    user_id,
+    target_date=None
+):
 
-    today = datetime.now(
-        TAIWAN_TZ
-    ).date()
+    target_date = normalize_date(
+        target_date
+    )
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                DELETE FROM meals
+
+                WHERE
+                    user_id = %s
+                    AND meal_date = %s
+
+                RETURNING id;
+                """,
+                (
+                    user_id,
+                    target_date
+                )
+            )
+
+            deleted = cursor.fetchall()
+
+        conn.commit()
+
+        return len(deleted)
+
+    finally:
+        conn.close()
+
+
+def reset_today(user_id):
+
+    return reset_day(
+        user_id,
+        taiwan_today()
+    )
+
+
+# =========================================================
+# 取得指定日期所有餐點
+# =========================================================
+
+def get_meals_by_date(
+    user_id,
+    target_date=None
+):
+
+    target_date = normalize_date(
+        target_date
+    )
 
     conn = get_connection()
 
@@ -648,31 +938,46 @@ def get_today_meals(user_id):
                     user_id = %s
                     AND meal_date = %s
 
-                ORDER BY meal_time ASC;
+                ORDER BY
+                    meal_time ASC,
+                    id ASC;
                 """,
-
                 (
                     user_id,
-                    today
+                    target_date
                 )
             )
 
             return cursor.fetchall()
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# 今日營養總計
+# 今天所有餐點
 # =========================================================
 
-def get_today_totals(user_id):
+def get_today_meals(user_id):
 
-    today = datetime.now(
-        TAIWAN_TZ
-    ).date()
+    return get_meals_by_date(
+        user_id,
+        taiwan_today()
+    )
+
+
+# =========================================================
+# 指定日期營養總計
+# =========================================================
+
+def get_totals_by_date(
+    user_id,
+    target_date=None
+):
+
+    target_date = normalize_date(
+        target_date
+    )
 
     conn = get_connection()
 
@@ -722,22 +1027,389 @@ def get_today_totals(user_id):
                     user_id = %s
                     AND meal_date = %s;
                 """,
-
                 (
                     user_id,
-                    today
+                    target_date
                 )
             )
 
             return cursor.fetchone()
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# V3：個人資料欄位
+# 今日總計
+# =========================================================
+
+def get_today_totals(user_id):
+
+    return get_totals_by_date(
+        user_id,
+        taiwan_today()
+    )
+
+
+# =========================================================
+# V4：取得月份所有餐點
+# =========================================================
+
+def get_month_meals(
+    user_id,
+    year=None,
+    month=None
+):
+
+    now = taiwan_now()
+
+    year = year or now.year
+    month = month or now.month
+
+    start_date = date(
+        int(year),
+        int(month),
+        1
+    )
+
+    if month == 12:
+
+        end_date = date(
+            int(year) + 1,
+            1,
+            1
+        )
+
+    else:
+
+        end_date = date(
+            int(year),
+            int(month) + 1,
+            1
+        )
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM meals
+
+                WHERE
+                    user_id = %s
+                    AND meal_date >= %s
+                    AND meal_date < %s
+
+                ORDER BY
+                    meal_date ASC,
+                    meal_time ASC;
+                """,
+                (
+                    user_id,
+                    start_date,
+                    end_date
+                )
+            )
+
+            return cursor.fetchall()
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V4：每月每日統計
+# =========================================================
+
+def get_month_daily_totals(
+    user_id,
+    year=None,
+    month=None
+):
+
+    now = taiwan_now()
+
+    year = year or now.year
+    month = month or now.month
+
+    start_date = date(
+        int(year),
+        int(month),
+        1
+    )
+
+    if month == 12:
+
+        end_date = date(
+            int(year) + 1,
+            1,
+            1
+        )
+
+    else:
+
+        end_date = date(
+            int(year),
+            int(month) + 1,
+            1
+        )
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT
+
+                    meal_date,
+
+                    COUNT(*) AS meal_count,
+
+                    COALESCE(
+                        SUM(calories),
+                        0
+                    ) AS calories,
+
+                    COALESCE(
+                        SUM(protein),
+                        0
+                    ) AS protein,
+
+                    COALESCE(
+                        SUM(carbs),
+                        0
+                    ) AS carbs,
+
+                    COALESCE(
+                        SUM(fat),
+                        0
+                    ) AS fat,
+
+                    COALESCE(
+                        SUM(fiber),
+                        0
+                    ) AS fiber,
+
+                    COALESCE(
+                        SUM(sodium),
+                        0
+                    ) AS sodium
+
+                FROM meals
+
+                WHERE
+                    user_id = %s
+                    AND meal_date >= %s
+                    AND meal_date < %s
+
+                GROUP BY meal_date
+
+                ORDER BY meal_date ASC;
+                """,
+                (
+                    user_id,
+                    start_date,
+                    end_date
+                )
+            )
+
+            return cursor.fetchall()
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V4：月份摘要
+# =========================================================
+
+def get_month_summary(
+    user_id,
+    year=None,
+    month=None
+):
+
+    daily_rows = get_month_daily_totals(
+        user_id,
+        year,
+        month
+    )
+
+    if not daily_rows:
+
+        return {
+            "recorded_days": 0,
+            "meal_count": 0,
+            "avg_calories": 0,
+            "avg_protein": 0,
+            "avg_carbs": 0,
+            "avg_fat": 0,
+            "avg_fiber": 0,
+            "total_calories": 0,
+            "highest_calories": 0,
+            "lowest_calories": 0,
+            "days": []
+        }
+
+    recorded_days = len(
+        daily_rows
+    )
+
+    meal_count = sum(
+        int(
+            row.get(
+                "meal_count",
+                0
+            )
+            or 0
+        )
+        for row in daily_rows
+    )
+
+    total_calories = sum(
+        float(
+            row.get(
+                "calories",
+                0
+            )
+            or 0
+        )
+        for row in daily_rows
+    )
+
+    total_protein = sum(
+        float(
+            row.get(
+                "protein",
+                0
+            )
+            or 0
+        )
+        for row in daily_rows
+    )
+
+    total_carbs = sum(
+        float(
+            row.get(
+                "carbs",
+                0
+            )
+            or 0
+        )
+        for row in daily_rows
+    )
+
+    total_fat = sum(
+        float(
+            row.get(
+                "fat",
+                0
+            )
+            or 0
+        )
+        for row in daily_rows
+    )
+
+    total_fiber = sum(
+        float(
+            row.get(
+                "fiber",
+                0
+            )
+            or 0
+        )
+        for row in daily_rows
+    )
+
+    calorie_values = [
+        float(
+            row.get(
+                "calories",
+                0
+            )
+            or 0
+        )
+        for row in daily_rows
+    ]
+
+    return {
+        "recorded_days":
+            recorded_days,
+
+        "meal_count":
+            meal_count,
+
+        "avg_calories":
+            round(
+                total_calories
+                / recorded_days,
+                1
+            ),
+
+        "avg_protein":
+            round(
+                total_protein
+                / recorded_days,
+                1
+            ),
+
+        "avg_carbs":
+            round(
+                total_carbs
+                / recorded_days,
+                1
+            ),
+
+        "avg_fat":
+            round(
+                total_fat
+                / recorded_days,
+                1
+            ),
+
+        "avg_fiber":
+            round(
+                total_fiber
+                / recorded_days,
+                1
+            ),
+
+        "total_calories":
+            round(
+                total_calories,
+                1
+            ),
+
+        "highest_calories":
+            round(
+                max(
+                    calorie_values
+                ),
+                1
+            ),
+
+        "lowest_calories":
+            round(
+                min(
+                    calorie_values
+                ),
+                1
+            ),
+
+        "days":
+            daily_rows
+    }
+
+
+# =========================================================
+# 個人資料欄位
 # =========================================================
 
 PROFILE_FIELDS = {
@@ -746,6 +1418,7 @@ PROFILE_FIELDS = {
     "weight_kg",
     "age",
     "sex",
+
     "activity_level",
     "goal",
 
@@ -758,12 +1431,20 @@ PROFILE_FIELDS = {
     "fat_target",
     "fiber_target",
 
+    "custom_calorie_target",
+    "custom_protein_target",
+    "custom_carbs_target",
+    "custom_fat_target",
+    "custom_fiber_target",
+
+    "use_custom_targets",
+
     "inbody",
 }
 
 
 # =========================================================
-# V3：取得個人資料
+# 取得個人資料
 # =========================================================
 
 def get_profile(user_id):
@@ -789,22 +1470,11 @@ def get_profile(user_id):
             return cursor.fetchone()
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# V3：部分更新個人資料
-#
-# 核心差異：
-#
-# 使用者只傳「女」
-# → 只更新 sex
-#
-# 使用者只傳「我現在58公斤」
-# → 只更新 weight_kg
-#
-# 其他舊資料不會被清空
+# 部分更新個人資料
 # =========================================================
 
 def update_profile_fields(
@@ -827,19 +1497,15 @@ def update_profile_fields(
             and value is not None
         ):
 
-            clean_updates[key] = value
+            clean_updates[
+                key
+            ] = value
 
     if not clean_updates:
 
         return get_profile(
             user_id
         )
-
-
-    # -----------------------------------------------------
-    # 如果還沒有這個使用者
-    # 先建立一筆空白 profile
-    # -----------------------------------------------------
 
     conn = get_connection()
 
@@ -866,13 +1532,7 @@ def update_profile_fields(
         conn.commit()
 
     finally:
-
         conn.close()
-
-
-    # -----------------------------------------------------
-    # 動態更新「這次真的有傳的欄位」
-    # -----------------------------------------------------
 
     conn = get_connection()
 
@@ -919,7 +1579,9 @@ def update_profile_fields(
             sql = (
                 "UPDATE user_profiles "
                 "SET "
-                + ", ".join(set_parts)
+                + ", ".join(
+                    set_parts
+                )
                 + " WHERE user_id = %s "
                 + "RETURNING *;"
             )
@@ -936,17 +1598,11 @@ def update_profile_fields(
         return result
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# V3：save_profile
-#
-# 保留原本函式名稱，
-# 所以 app.py 舊功能不會因為改 database.py 就壞掉。
-#
-# 但現在改成「部分更新」。
+# 儲存個人資料
 # =========================================================
 
 def save_profile(
@@ -961,7 +1617,7 @@ def save_profile(
 
 
 # =========================================================
-# V3：取得尚未填寫的必要資料
+# 尚缺哪些個人資料
 # =========================================================
 
 def get_missing_profile_fields(
@@ -982,7 +1638,6 @@ def get_missing_profile_fields(
     ]
 
     if not profile:
-
         return required_fields
 
     missing = []
@@ -993,7 +1648,10 @@ def get_missing_profile_fields(
             field
         )
 
-        if value is None or value == "":
+        if (
+            value is None
+            or value == ""
+        ):
 
             missing.append(
                 field
@@ -1003,7 +1661,7 @@ def get_missing_profile_fields(
 
 
 # =========================================================
-# V3：個人資料是否完整
+# 個人資料是否完整
 # =========================================================
 
 def is_profile_complete(
@@ -1021,12 +1679,7 @@ def is_profile_complete(
 
 
 # =========================================================
-# V3：清除計算結果
-#
-# 當身高 / 體重 / 年齡 / 性別 /
-# 活動量 / 目標改變時，
-# app.py 可以先清掉舊 BMR/TDEE，
-# 再重新計算。
+# 清除系統自動計算目標
 # =========================================================
 
 def clear_profile_targets(
@@ -1070,7 +1723,664 @@ def clear_profile_targets(
         return result
 
     finally:
+        conn.close()
 
+
+# =========================================================
+# V4：設定永久自訂營養目標
+# =========================================================
+
+def set_custom_targets(
+    user_id,
+    calorie_target=None,
+    protein_target=None,
+    carbs_target=None,
+    fat_target=None,
+    fiber_target=None
+):
+
+    updates = {
+        "use_custom_targets": True
+    }
+
+    if calorie_target is not None:
+
+        updates[
+            "custom_calorie_target"
+        ] = float(
+            calorie_target
+        )
+
+    if protein_target is not None:
+
+        updates[
+            "custom_protein_target"
+        ] = float(
+            protein_target
+        )
+
+    if carbs_target is not None:
+
+        updates[
+            "custom_carbs_target"
+        ] = float(
+            carbs_target
+        )
+
+    if fat_target is not None:
+
+        updates[
+            "custom_fat_target"
+        ] = float(
+            fat_target
+        )
+
+    if fiber_target is not None:
+
+        updates[
+            "custom_fiber_target"
+        ] = float(
+            fiber_target
+        )
+
+    return update_profile_fields(
+        user_id,
+        updates
+    )
+
+
+# =========================================================
+# V4：關閉永久自訂目標
+# =========================================================
+
+def reset_custom_targets(
+    user_id
+):
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                UPDATE user_profiles
+
+                SET
+                    use_custom_targets = FALSE,
+
+                    custom_calorie_target = NULL,
+                    custom_protein_target = NULL,
+                    custom_carbs_target = NULL,
+                    custom_fat_target = NULL,
+                    custom_fiber_target = NULL,
+
+                    updated_at = NOW()
+
+                WHERE user_id = %s
+
+                RETURNING *;
+                """,
+                (
+                    user_id,
+                )
+            )
+
+            result = cursor.fetchone()
+
+        conn.commit()
+
+        return result
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V4：設定「某一天」營養目標
+#
+# 例如：
+# 今天低碳
+# 蛋白質 80
+# 碳水 80
+# 脂肪 45
+#
+# 不影響明天
+# =========================================================
+
+def set_daily_targets(
+    user_id,
+    target_date=None,
+    calorie_target=None,
+    protein_target=None,
+    carbs_target=None,
+    fat_target=None,
+    fiber_target=None,
+    mode_name=None
+):
+
+    target_date = normalize_date(
+        target_date
+    )
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                INSERT INTO daily_targets (
+
+                    user_id,
+                    target_date,
+
+                    calorie_target,
+                    protein_target,
+                    carbs_target,
+                    fat_target,
+                    fiber_target,
+
+                    mode_name
+                )
+
+                VALUES (
+                    %s,
+                    %s,
+
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+
+                    %s
+                )
+
+                ON CONFLICT (
+                    user_id,
+                    target_date
+                )
+
+                DO UPDATE SET
+
+                    calorie_target =
+                        COALESCE(
+                            EXCLUDED.calorie_target,
+                            daily_targets.calorie_target
+                        ),
+
+                    protein_target =
+                        COALESCE(
+                            EXCLUDED.protein_target,
+                            daily_targets.protein_target
+                        ),
+
+                    carbs_target =
+                        COALESCE(
+                            EXCLUDED.carbs_target,
+                            daily_targets.carbs_target
+                        ),
+
+                    fat_target =
+                        COALESCE(
+                            EXCLUDED.fat_target,
+                            daily_targets.fat_target
+                        ),
+
+                    fiber_target =
+                        COALESCE(
+                            EXCLUDED.fiber_target,
+                            daily_targets.fiber_target
+                        ),
+
+                    mode_name =
+                        COALESCE(
+                            EXCLUDED.mode_name,
+                            daily_targets.mode_name
+                        ),
+
+                    updated_at = NOW()
+
+                RETURNING *;
+                """,
+
+                (
+                    user_id,
+                    target_date,
+
+                    calorie_target,
+                    protein_target,
+                    carbs_target,
+                    fat_target,
+                    fiber_target,
+
+                    mode_name
+                )
+            )
+
+            result = cursor.fetchone()
+
+        conn.commit()
+
+        return result
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V4：取得單日自訂目標
+# =========================================================
+
+def get_daily_targets(
+    user_id,
+    target_date=None
+):
+
+    target_date = normalize_date(
+        target_date
+    )
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM daily_targets
+
+                WHERE
+                    user_id = %s
+                    AND target_date = %s;
+                """,
+                (
+                    user_id,
+                    target_date
+                )
+            )
+
+            return cursor.fetchone()
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V4：刪除單日自訂目標
+# =========================================================
+
+def clear_daily_targets(
+    user_id,
+    target_date=None
+):
+
+    target_date = normalize_date(
+        target_date
+    )
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                DELETE FROM daily_targets
+
+                WHERE
+                    user_id = %s
+                    AND target_date = %s
+
+                RETURNING id;
+                """,
+                (
+                    user_id,
+                    target_date
+                )
+            )
+
+            result = cursor.fetchone()
+
+        conn.commit()
+
+        return bool(result)
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V4：取得「真正要使用」的營養目標
+#
+# 優先順序：
+#
+# 1. 今天單日設定
+# 2. 永久自訂設定
+# 3. 系統自動計算
+# =========================================================
+
+def get_effective_targets(
+    user_id,
+    target_date=None
+):
+
+    target_date = normalize_date(
+        target_date
+    )
+
+    profile = get_profile(
+        user_id
+    )
+
+    if not profile:
+        return None
+
+    result = {
+        "calorie_target":
+            profile.get(
+                "calorie_target"
+            ),
+
+        "protein_target":
+            profile.get(
+                "protein_target"
+            ),
+
+        "carbs_target":
+            profile.get(
+                "carbs_target"
+            ),
+
+        "fat_target":
+            profile.get(
+                "fat_target"
+            ),
+
+        "fiber_target":
+            profile.get(
+                "fiber_target"
+            )
+            or 25,
+
+        "source":
+            "system",
+
+        "mode_name":
+            None
+    }
+
+    # -----------------------------------------------------
+    # 永久自訂
+    # -----------------------------------------------------
+
+    if profile.get(
+        "use_custom_targets"
+    ):
+
+        mapping = {
+            "calorie_target":
+                "custom_calorie_target",
+
+            "protein_target":
+                "custom_protein_target",
+
+            "carbs_target":
+                "custom_carbs_target",
+
+            "fat_target":
+                "custom_fat_target",
+
+            "fiber_target":
+                "custom_fiber_target",
+        }
+
+        for normal_key, custom_key in mapping.items():
+
+            custom_value = profile.get(
+                custom_key
+            )
+
+            if custom_value is not None:
+
+                result[
+                    normal_key
+                ] = custom_value
+
+        result[
+            "source"
+        ] = "custom"
+
+    # -----------------------------------------------------
+    # 單日設定優先級最高
+    # -----------------------------------------------------
+
+    daily = get_daily_targets(
+        user_id,
+        target_date
+    )
+
+    if daily:
+
+        for key in [
+            "calorie_target",
+            "protein_target",
+            "carbs_target",
+            "fat_target",
+            "fiber_target",
+        ]:
+
+            if daily.get(
+                key
+            ) is not None:
+
+                result[
+                    key
+                ] = daily[
+                    key
+                ]
+
+        result[
+            "source"
+        ] = "daily"
+
+        result[
+            "mode_name"
+        ] = daily.get(
+            "mode_name"
+        )
+
+    return result
+
+
+# =========================================================
+# V4：記錄體重
+# =========================================================
+
+def save_weight(
+    user_id,
+    weight_kg,
+    log_date=None
+):
+
+    log_date = normalize_date(
+        log_date
+    )
+
+    weight_kg = float(
+        weight_kg
+    )
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                INSERT INTO weight_logs (
+
+                    user_id,
+                    log_date,
+                    weight_kg
+                )
+
+                VALUES (
+                    %s,
+                    %s,
+                    %s
+                )
+
+                ON CONFLICT (
+                    user_id,
+                    log_date
+                )
+
+                DO UPDATE SET
+
+                    weight_kg =
+                        EXCLUDED.weight_kg,
+
+                    updated_at = NOW()
+
+                RETURNING *;
+                """,
+                (
+                    user_id,
+                    log_date,
+                    weight_kg
+                )
+            )
+
+            result = cursor.fetchone()
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+    # 同時更新個人資料目前體重
+    update_profile_fields(
+        user_id,
+        {
+            "weight_kg":
+                weight_kg
+        }
+    )
+
+    return result
+
+
+# =========================================================
+# V4：取得體重歷史
+# =========================================================
+
+def get_weight_logs(
+    user_id,
+    limit=60
+):
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM weight_logs
+
+                WHERE user_id = %s
+
+                ORDER BY log_date DESC
+
+                LIMIT %s;
+                """,
+                (
+                    user_id,
+                    limit
+                )
+            )
+
+            return cursor.fetchall()
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V4：取得月份體重
+# =========================================================
+
+def get_month_weight_logs(
+    user_id,
+    year=None,
+    month=None
+):
+
+    now = taiwan_now()
+
+    year = year or now.year
+    month = month or now.month
+
+    start_date = date(
+        int(year),
+        int(month),
+        1
+    )
+
+    if month == 12:
+
+        end_date = date(
+            int(year) + 1,
+            1,
+            1
+        )
+
+    else:
+
+        end_date = date(
+            int(year),
+            int(month) + 1,
+            1
+        )
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM weight_logs
+
+                WHERE
+                    user_id = %s
+                    AND log_date >= %s
+                    AND log_date < %s
+
+                ORDER BY log_date ASC;
+                """,
+                (
+                    user_id,
+                    start_date,
+                    end_date
+                )
+            )
+
+            return cursor.fetchall()
+
+    finally:
         conn.close()
 
 
@@ -1132,12 +2442,11 @@ def add_food_memory(
         return result["id"]
 
     finally:
-
         conn.close()
 
 
 # =========================================================
-# 取得使用者食物記憶
+# 取得食物記憶
 # =========================================================
 
 def get_food_memories(
@@ -1162,7 +2471,6 @@ def get_food_memories(
 
                 LIMIT %s;
                 """,
-
                 (
                     user_id,
                     limit
@@ -1172,5 +2480,4 @@ def get_food_memories(
             return cursor.fetchall()
 
     finally:
-
         conn.close()
