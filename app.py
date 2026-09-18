@@ -4,6 +4,8 @@ import io
 import re
 import random
 import requests
+import urllib.parse
+import json
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -18,6 +20,7 @@ from linebot.v3.messaging import (
     MessagingApi,
     ReplyMessageRequest,
     TextMessage,
+    ImageMessage,
     FlexMessage,
     FlexContainer,
 )
@@ -102,6 +105,10 @@ from database import (
     mark_exercise_plan,
     get_exercise_range,
     get_unfinished_exercise_plans,
+    get_weight_logs,
+    get_meal_range,
+    save_inbody,
+    get_inbody_logs,
 )
 
 
@@ -126,7 +133,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V5.7 is running!"
+    return "LINE Food AI Bot V6.0 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -1505,6 +1512,170 @@ def rich_menu_more_reply():
 
 
 
+
+# =========================================================
+# V6.0：簡約導航 + Dashboard + 趨勢圖 + InBody
+# =========================================================
+
+def _action_button(label, data, style="secondary"):
+    return {"type":"button","style":style,"height":"sm",
+            "action":{"type":"postback","label":label,"data":data,"displayText":label}}
+
+def _nav_card(title, desc, button, data, emoji):
+    return {"type":"bubble","size":"kilo",
+      "body":{"type":"box","layout":"vertical","spacing":"md","contents":[
+        {"type":"text","text":f"{emoji} {title}","weight":"bold","size":"xl","wrap":True},
+        {"type":"text","text":desc,"size":"sm","color":"#666666","wrap":True}]},
+      "footer":{"type":"box","layout":"vertical","contents":[_action_button(button,data,"primary")]}}
+
+def main_hub_flex():
+    cards=[
+      _nav_card("吃什麼","依今天紀錄，選減脂／高蛋白／低碳／彈性餐。","選今天吃法","diet:menu","🍱"),
+      _nav_card("去運動","今天練什麼、常用模板、完成與補登。","打開運動中心","tpl:menu","🏋️"),
+      _nav_card("今日進度","熱量、三大營養素、喝水一次看。","看今天","dash:today","📊"),
+      _nav_card("我的趨勢","體重、營養、運動、InBody 圖表。","看趨勢","trend:menu","📈"),
+      _nav_card("我的資料","體重、目標與目前設定。","查看資料","nav:profile","👤"),
+      _nav_card("使用說明","不用背指令，選你想做的事。","怎麼用","help:menu","📖"),
+    ]
+    return FlexMessage(alt_text="☰ 更多功能",contents=FlexContainer.from_dict({"type":"carousel","contents":cards}))
+
+def help_menu_flex():
+    cards=[
+      _nav_card("記一餐","拍餐點照片，或直接打「早餐吃蛋餅豆漿」。","我要記飲食","help:food","📸"),
+      _nav_card("吃什麼","打「吃什麼」「晚餐吃什麼」會直接開 ABC。","打開飲食 ABC","diet:menu","🍱"),
+      _nav_card("運動","打「今天練什麼」「拉日」「只有20分鐘」。","看運動模板","tpl:menu","🏋️"),
+      _nav_card("查紀錄","今天、昨天、本週、體重與營養趨勢。","看我的趨勢","trend:menu","📈"),
+      _nav_card("修改紀錄","直接說「飯只有半碗」或「刪掉上一餐」。","看修改方法","help:edit","✏️"),
+      _nav_card("InBody","直接輸入一行 InBody 數字，就能保存並比較。","看輸入格式","help:inbody","🧬"),
+    ]
+    return FlexMessage(alt_text="📖 BOT 使用說明",contents=FlexContainer.from_dict({"type":"carousel","contents":cards}))
+
+def trend_menu_flex():
+    cards=[
+      _nav_card("體重趨勢","看 7／30／90 天體重變化。","看 30 天","trend:weight:30","⚖️"),
+      _nav_card("營養趨勢","每日熱量折線＋今天營養比例。","看 30 天","trend:nutrition:30","🍽️"),
+      _nav_card("運動趨勢","每週／每月運動分鐘與消耗。","看 30 天","trend:exercise:30","🏋️"),
+      _nav_card("InBody 趨勢","體脂率與骨骼肌量變化。","看 InBody","trend:inbody:90","🧬"),
+    ]
+    return FlexMessage(alt_text="📈 我的趨勢",contents=FlexContainer.from_dict({"type":"carousel","contents":cards}))
+
+def _quickchart_url(chart_type, labels, datasets, title=""):
+    cfg={"type":chart_type,
+         "data":{"labels":labels,"datasets":datasets},
+         "options":{"plugins":{"title":{"display":bool(title),"text":title},
+                               "legend":{"display":True}},
+                    "scales":{"y":{"beginAtZero":False}}}}
+    return "https://quickchart.io/chart?width=900&height=520&devicePixelRatio=2&c="+urllib.parse.quote(
+        json.dumps(cfg,ensure_ascii=False,separators=(",",":")))
+
+def _chart_image(url):
+    return ImageMessage(original_content_url=url, preview_image_url=url)
+
+def today_dashboard_flex(user_id):
+    totals=totals_to_dict(get_today_totals(user_id))
+    targets=get_effective_targets(user_id) or {}
+    water=get_today_water(user_id) or {}
+    cal=float(totals.get("calories") or 0); ct=float(targets.get("calorie_target") or 0)
+    p=float(totals.get("protein") or 0); c=float(totals.get("carbs") or 0); f=float(totals.get("fat") or 0)
+    wt=float(water.get("total_ml") or 0); wtg=float(water.get("target_ml") or 2000)
+    def pct(v,t): return min(100,round(v/t*100)) if t else 0
+    body=[
+      {"type":"text","text":"📊 今天","weight":"bold","size":"xxl"},
+      {"type":"text","text":f"🔥 {round(cal)} / {round(ct) if ct else '—'} kcal","weight":"bold","size":"lg","margin":"md"},
+      {"type":"text","text":f"🥩 蛋白質 {round(p,1)}g　🍚 碳水 {round(c,1)}g","size":"sm","wrap":True},
+      {"type":"text","text":f"🥑 脂肪 {round(f,1)}g　💧 水 {round(wt)} / {round(wtg)}ml","size":"sm","wrap":True},
+      {"type":"separator","margin":"md"},
+      {"type":"text","text":f"熱量 {pct(cal,ct)}%　｜　喝水 {pct(wt,wtg)}%","size":"sm","color":"#666666","margin":"md"}]
+    footer=[_action_button("🍱 吃什麼","diet:menu","primary"),_action_button("📈 看趨勢","trend:menu")]
+    return FlexMessage(alt_text="📊 今日進度",contents=FlexContainer.from_dict(
+      {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},
+       "footer":{"type":"box","layout":"vertical","spacing":"sm","contents":footer}}))
+
+def nutrition_pie_url(user_id):
+    t=totals_to_dict(get_today_totals(user_id))
+    vals=[round(float(t.get("protein") or 0)*4),round(float(t.get("carbs") or 0)*4),round(float(t.get("fat") or 0)*9)]
+    return _quickchart_url("doughnut",["蛋白質","碳水","脂肪"],
+        [{"label":"kcal","data":vals}], "今日三大營養素熱量比例")
+
+def weight_chart_url(user_id,days=30):
+    rows=list(reversed(get_weight_logs(user_id,limit=max(days,7))))
+    cutoff=(datetime.now(TAIWAN_TZ).date()-__import__("datetime").timedelta(days=days-1))
+    rows=[r for r in rows if r.get("log_date")>=cutoff]
+    if len(rows)<2: return None
+    labels=[r["log_date"].strftime("%m/%d") for r in rows]
+    vals=[float(r["weight_kg"]) for r in rows]
+    return _quickchart_url("line",labels,[{"label":"體重 kg","data":vals,"fill":False}],"體重趨勢")
+
+def nutrition_chart_url(user_id,days=30):
+    end=datetime.now(TAIWAN_TZ).date()
+    start=end-__import__("datetime").timedelta(days=days-1)
+    rows=get_meal_range(user_id,start,end)
+    if len(rows)<2: return None
+    labels=[r["meal_date"].strftime("%m/%d") for r in rows]
+    vals=[round(float(r.get("calories") or 0)) for r in rows]
+    return _quickchart_url("line",labels,[{"label":"每日熱量 kcal","data":vals,"fill":False}],"飲食熱量趨勢")
+
+def exercise_chart_url(user_id,days=30):
+    end=datetime.now(TAIWAN_TZ).date()
+    start=end-__import__("datetime").timedelta(days=days-1)
+    rows=get_exercise_range(user_id,start,end)
+    if not rows: return None
+    by={}
+    for r in rows:
+        day=r["log_date"]
+        by.setdefault(day,0)
+        by[day]+=float(r.get("duration_minutes") or 0)
+    labels=[x.strftime("%m/%d") for x in sorted(by)]
+    vals=[round(by[x]) for x in sorted(by)]
+    return _quickchart_url("bar",labels,[{"label":"運動分鐘","data":vals}],"運動趨勢")
+
+def inbody_chart_url(user_id,days=90):
+    rows=list(reversed(get_inbody_logs(user_id,limit=30)))
+    cutoff=datetime.now(TAIWAN_TZ).date()-__import__("datetime").timedelta(days=days-1)
+    rows=[r for r in rows if r["log_date"]>=cutoff]
+    if len(rows)<2: return None
+    labels=[r["log_date"].strftime("%m/%d") for r in rows]
+    ds=[]
+    if any(r.get("body_fat_pct") is not None for r in rows):
+        ds.append({"label":"體脂率 %","data":[r.get("body_fat_pct") for r in rows],"fill":False})
+    if any(r.get("skeletal_muscle_kg") is not None for r in rows):
+        ds.append({"label":"骨骼肌 kg","data":[r.get("skeletal_muscle_kg") for r in rows],"fill":False})
+    if not ds:return None
+    return _quickchart_url("line",labels,ds,"InBody 趨勢")
+
+def parse_inbody_text(text):
+    t=str(text or "")
+    if "inbody" not in t.lower() and "體脂" not in t and "骨骼肌" not in t: return None
+    aliases={
+      "weight_kg":[r"體重\s*([0-9.]+)",r"weight\s*([0-9.]+)"],
+      "body_fat_pct":[r"體脂(?:率)?\s*([0-9.]+)\s*%?"],
+      "body_fat_kg":[r"體脂肪(?:量)?\s*([0-9.]+)\s*kg"],
+      "skeletal_muscle_kg":[r"骨骼肌(?:量)?\s*([0-9.]+)"],
+      "bmi":[r"bmi\s*([0-9.]+)"],
+      "visceral_fat_level":[r"內臟脂肪(?:等級)?\s*([0-9.]+)"],
+      "bmr":[r"(?:bmr|基礎代謝)\s*([0-9.]+)"]}
+    out={}
+    for k,patterns in aliases.items():
+        for p in patterns:
+            m=re.search(p,t,re.I)
+            if m:
+                out[k]=float(m.group(1)); break
+    return out or None
+
+def inbody_saved_flex(row):
+    lines=[]
+    names=[("weight_kg","體重","kg"),("body_fat_pct","體脂率","%"),
+           ("skeletal_muscle_kg","骨骼肌","kg"),("bmi","BMI",""),
+           ("visceral_fat_level","內臟脂肪",""),("bmr","基礎代謝","kcal")]
+    for k,n,u in names:
+        if row.get(k) is not None: lines.append(f"{n} {row[k]}{u}")
+    return FlexMessage(alt_text="🧬 InBody 已記錄",contents=FlexContainer.from_dict(
+      {"type":"bubble","body":{"type":"box","layout":"vertical","spacing":"md","contents":[
+        {"type":"text","text":"🧬 InBody 已記錄","weight":"bold","size":"xl"},
+        {"type":"text","text":"｜".join(lines),"wrap":True,"size":"sm"}]},
+       "footer":{"type":"box","layout":"vertical","contents":[_action_button("📈 看 InBody 趨勢","trend:inbody:90","primary")]}}))
+
+
 # =========================================================
 # V5.6：互動式運動中心（短、直覺、可追蹤）
 # =========================================================
@@ -1695,6 +1866,23 @@ def diet_choices_flex(code):
 def handle_postback_v56(event):
     user_id=get_user_id(event); data=getattr(event.postback,'data','') or ''
     try:
+        if data=='nav:hub': reply_messages(event.reply_token,[main_hub_flex()]); return
+        if data=='help:menu': reply_messages(event.reply_token,[help_menu_flex()]); return
+        if data=='trend:menu': reply_messages(event.reply_token,[trend_menu_flex()]); return
+        if data=='dash:today':
+            reply_messages(event.reply_token,[today_dashboard_flex(user_id),_chart_image(nutrition_pie_url(user_id))]); return
+        if data=='nav:profile': reply_text(event.reply_token, profile_reply(user_id)); return
+        if data=='help:food': reply_text(event.reply_token,"📸 記一餐\n\n拍餐點照片，或直接打：\n「早餐吃蛋餅豆漿」\n「早餐蛋、午餐雞胸便當、晚餐鮭魚地瓜」\n\n記錯直接說「飯只有半碗」就好。"); return
+        if data=='help:edit': reply_text(event.reply_token,"✏️ 修改／刪除\n\n直接說：\n・飯只有半碗\n・那是豆干不是肉\n・刪掉上一餐\n・重置今天"); return
+        if data=='help:inbody': reply_text(event.reply_token,"🧬 InBody\n\n直接一行貼給我，例如：\nInBody 體重58.6 體脂31.2 骨骼肌21.8 BMI22.9 內臟脂肪7 基礎代謝1250\n\n有兩筆以上就能畫趨勢圖。"); return
+        m=re.match(r'trend:(weight|nutrition|exercise|inbody):(7|30|90)$',data)
+        if m:
+            kind,days=m.group(1),int(m.group(2))
+            maker={'weight':weight_chart_url,'nutrition':nutrition_chart_url,'exercise':exercise_chart_url,'inbody':inbody_chart_url}[kind]
+            url=maker(user_id,days)
+            if not url: reply_text(event.reply_token,"📈 目前資料還不夠畫趨勢圖。至少記錄 2 個不同日期，我就能幫你畫。")
+            else: reply_messages(event.reply_token,[_chart_image(url)])
+            return
         if data=='tpl:menu': reply_messages(event.reply_token,[workout_template_menu_flex(user_id)]); return
         m=re.match(r'tpl:show:(UPPER|LOWER|PUSH|PULL|FULL|LOW)$',data)
         if m: reply_messages(event.reply_token,[workout_template_detail_flex(user_id,m.group(1))]); return
@@ -1787,12 +1975,12 @@ def handle_text(event):
             reply_text(event.reply_token, rich_menu_food_entry_reply())
             return
 
-        if text == "今日進度":
-            reply_text(event.reply_token, rich_menu_today_reply(user_id))
+        if text in ["今日進度","今天","今日","今天吃多少","今天還能吃多少"]:
+            reply_messages(event.reply_token,[today_dashboard_flex(user_id),_chart_image(nutrition_pie_url(user_id))])
             return
 
-        if text == "吃什麼":
-            reply_text(event.reply_token, rich_menu_smart_advice(user_id, "meal"))
+        if text in ["吃什麼","晚餐吃什麼","午餐吃什麼","早餐吃什麼","不知道吃什麼","我餓了","好餓"]:
+            reply_messages(event.reply_token,[diet_mode_menu_flex()])
             return
 
         if text == "喝水":
@@ -1803,8 +1991,32 @@ def handle_text(event):
             reply_messages(event.reply_token, [exercise_choice_flex(user_id)])
             return
 
-        if text == "更多功能":
-            reply_text(event.reply_token, rich_menu_more_reply())
+        if text in ["更多功能","更多","選單","功能選單"]:
+            reply_messages(event.reply_token,[main_hub_flex()])
+            return
+
+        if text in ["我的趨勢","趨勢","圖表","健康趨勢"]:
+            reply_messages(event.reply_token,[trend_menu_flex()])
+            return
+
+        ib=parse_inbody_text(text)
+        if ib:
+            row=save_inbody(user_id,ib)
+            reply_messages(event.reply_token,[inbody_saved_flex(row)])
+            return
+
+        compact=re.sub(r"\s+","",text)
+        direct_tpl=None
+        if any(k in compact for k in ["上半身","上肢日"]): direct_tpl="UPPER"
+        elif any(k in compact for k in ["下半身","腿日","練腿"]): direct_tpl="LOWER"
+        elif any(k in compact.lower() for k in ["push","推日"]): direct_tpl="PUSH"
+        elif any(k in compact.lower() for k in ["pull","拉日"]): direct_tpl="PULL"
+        elif any(k in compact for k in ["全身日","全身訓練"]): direct_tpl="FULL"
+        if direct_tpl and any(k in compact for k in ["練","日","菜單","運動"]):
+            reply_messages(event.reply_token,[workout_template_detail_flex(user_id,direct_tpl)])
+            return
+        if any(k in compact for k in ["今天練什麼","今天練啥","我要運動","健身菜單","去運動"]):
+            reply_messages(event.reply_token,[workout_template_menu_flex(user_id)])
             return
 
         # -------------------------------------------------
@@ -1883,7 +2095,7 @@ def handle_text(event):
             "怎麼用", "使用說明", "使用方法", "指令", "help",
             "你會什麼", "功能", "功能說明",
         ]:
-            reply_text(event.reply_token, usage_help())
+            reply_messages(event.reply_token,[help_menu_flex()])
             return
 
         # -------------------------------------------------
