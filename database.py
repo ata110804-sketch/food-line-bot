@@ -348,6 +348,20 @@ def init_database():
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS exercise_plans (
+                    id SERIAL PRIMARY KEY, user_id TEXT NOT NULL, plan_date DATE NOT NULL,
+                    plan_code TEXT NOT NULL, title TEXT NOT NULL, duration_minutes DOUBLE PRECISION,
+                    calories_low DOUBLE PRECISION, calories_high DOUBLE PRECISION,
+                    muscle_groups TEXT, exercises JSONB DEFAULT '[]'::jsonb, status TEXT DEFAULT 'recommended',
+                    completed_ratio DOUBLE PRECISION DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exercise_plans_user_date ON exercise_plans(user_id, plan_date);"
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS conversation_state (
                     user_id TEXT PRIMARY KEY,
                     context_type TEXT,
@@ -3084,3 +3098,62 @@ def clear_conversation_state(user_id):
         return bool(result)
     finally:
         conn.close()
+
+
+# =========================================================
+# V5.6：互動式運動方案 / 歷史
+# =========================================================
+def save_exercise_plan(user_id, plan_code, title, duration_minutes, calories_low, calories_high, muscle_groups, exercises, plan_date=None):
+    target_date = normalize_date(plan_date)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO exercise_plans (user_id, plan_date, plan_code, title, duration_minutes,
+                    calories_low, calories_high, muscle_groups, exercises, status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'recommended') RETURNING *;
+            """, (user_id,target_date,plan_code,title,duration_minutes,calories_low,calories_high,
+                  muscle_groups,json.dumps(exercises,ensure_ascii=False)))
+            row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def get_latest_exercise_plan(user_id, plan_code=None, target_date=None):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql="SELECT * FROM exercise_plans WHERE user_id=%s"; vals=[user_id]
+            if plan_code: sql += " AND plan_code=%s"; vals.append(plan_code)
+            if target_date is not None: sql += " AND plan_date=%s"; vals.append(normalize_date(target_date))
+            sql += " ORDER BY created_at DESC,id DESC LIMIT 1"
+            cursor.execute(sql,tuple(vals)); return cursor.fetchone()
+    finally: conn.close()
+
+def mark_exercise_plan(user_id, plan_id, status='completed', completed_ratio=1.0):
+    ratio=max(0,min(1,float(completed_ratio)))
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""UPDATE exercise_plans SET status=%s,completed_ratio=%s,updated_at=NOW()
+                WHERE id=%s AND user_id=%s RETURNING *""",(status,ratio,int(plan_id),user_id)); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def get_exercise_range(user_id, start_date, end_date):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""SELECT * FROM exercise_logs WHERE user_id=%s AND log_date BETWEEN %s AND %s
+                ORDER BY log_date DESC,created_at DESC,id DESC""",(user_id,normalize_date(start_date),normalize_date(end_date)))
+            return cursor.fetchall()
+    finally: conn.close()
+
+def get_unfinished_exercise_plans(user_id, days=7):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""SELECT * FROM exercise_plans WHERE user_id=%s AND status IN ('recommended','started')
+                AND plan_date >= %s ORDER BY plan_date DESC,created_at DESC LIMIT 5""",
+                (user_id, normalize_date(taiwan_now().date()-timedelta(days=days))))
+            return cursor.fetchall()
+    finally: conn.close()
