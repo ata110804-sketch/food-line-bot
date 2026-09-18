@@ -670,6 +670,7 @@ INTENT_SCHEMA = {
                 "weight_log",
                 "remaining",
                 "meal_advice",
+                "exercise_advice",
                 "remember_food",
                 "food_question",
                 "other"
@@ -1205,7 +1206,10 @@ remaining
 = 今天還能吃多少、剩多少熱量或營養額度。
 
 meal_advice
-= 根據今天剩餘額度問下一餐怎麼吃、晚餐吃什麼。
+= 根據今天剩餘額度問下一餐怎麼吃、晚餐吃什麼、今天怎麼吃、想吃某種食物要怎麼搭配。
+
+exercise_advice
+= 使用者想知道今天做什麼運動、只有幾分鐘怎麼練、減脂/增肌適合什麼運動、想安排運動。
 
 remember_food
 = 明確要求記住固定飲食習慣，例如「記住我都喝無糖豆漿」。
@@ -1252,101 +1256,77 @@ def off_topic_reply(text=None):
 def food_chat(
     text,
     profile=None,
-    totals=None
+    totals=None,
+    targets=None
 ):
+    """V5 智能體態回覆：依個人資料、今日累計與有效目標給飲食/運動建議。"""
+    profile_data = dict(profile) if profile else {}
+    totals_data = dict(totals) if totals else {}
+    targets_data = dict(targets) if targets else {}
 
-    profile_data = (
-        dict(profile)
-        if profile
-        else {}
-    )
+    def n(d, key):
+        try:
+            return float(d.get(key, 0) or 0)
+        except Exception:
+            return 0.0
 
-    totals_data = (
-        dict(totals)
-        if totals
-        else {}
-    )
+    remaining = {}
+    pairs = [
+        ("calories", "calorie_target"),
+        ("protein", "protein_target"),
+        ("carbs", "carbs_target"),
+        ("fat", "fat_target"),
+        ("fiber", "fiber_target"),
+    ]
+    for used_key, target_key in pairs:
+        target = n(targets_data, target_key)
+        if target > 0:
+            remaining[used_key] = round(target - n(totals_data, used_key), 1)
 
     context = f"""
 使用者個人資料：
+{json.dumps(profile_data, ensure_ascii=False, default=str)}
 
-{json.dumps(
-    profile_data,
-    ensure_ascii=False,
-    default=str
-)}
+今天有效營養目標：
+{json.dumps(targets_data, ensure_ascii=False, default=str)}
 
 今天目前飲食累計：
+{json.dumps(totals_data, ensure_ascii=False, default=str)}
 
-{json.dumps(
-    totals_data,
-    ensure_ascii=False,
-    default=str
-)}
+系統已計算的今日剩餘（負數代表已超標）：
+{json.dumps(remaining, ensure_ascii=False)}
 
-使用者現在問：
-
+使用者現在說：
 「{text}」
 """
 
     response = client.responses.create(
-
         model=MODEL,
-
-        reasoning={
-            "effort": "none"
-        },
-
+        reasoning={"effort": "none"},
         instructions="""
-你是台灣使用者的個人飲食助理。
+你是台灣使用者每天會使用的飲食與體態 BOT。不要自稱教練。
 
-回答必須：
+你要像一個很熟使用者、懂飲食與運動、會盯進度的朋友。語氣可以偏魔鬼、會催、會吐槽，但重點永遠是實用。不要每一句都嗆，只有偷懶、明顯偏離目標或適合開玩笑時才吐槽一句。
 
-簡潔
-實用
-自然
-像朋友
-方便直接執行
+回答規則：
+1. 預設 3～8 行，先回答問題，不寫長篇大道理。
+2. 有每日目標和今日累計時，必須優先使用「剩餘」數字，不要自己重新亂算。
+3. 蛋白質不足可以明確說「還差約 X g」；熱量/脂肪/碳水超標可以說「已超約 X」。
+4. 小幅超標不要製造焦慮，也不要叫使用者跳餐、挨餓或用大量運動補償。
+5. 問「今天/晚餐吃什麼」時，給 2～3 組台灣容易取得的具體餐點組合，並依剩餘額度調整份量；可包含超商、自助餐、便當、火鍋、早餐店等。
+6. 使用者指定想吃某樣東西時，不要只禁止；優先告訴他怎麼搭配、怎麼調整份量比較適合今天。
+7. 問運動時，依目標、活動量及使用者說的時間/疲勞程度，直接給可執行安排。若沒有時間資訊，預設給 20～40 分鐘版本。
+8. 運動安排以一般成人安全範圍為主，可用快走、腳踏車、基礎阻力訓練、深蹲、臀橋、划船、推舉、核心等；若使用者提到疼痛、受傷、疾病或醫療限制，不要硬排動作，改請其依醫療專業建議調整。
+9. 不要羞辱體重、身材、外貌，不鼓勵極端節食。
+10. 若資料不足，仍可提供一般建議，但要簡短說明「先用一般版」。
 
-預設 3～7 行內回答。
-先直接回答問題，再補最多 2 個重點。
-除非使用者明確要求詳細說明，否則不要寫長篇文章、不要使用 Markdown 標題（#、##、###）或粗體符號 **。
-
-如果有個人每日目標與今日累計，
-優先依照剩餘熱量、
-蛋白質、碳水、脂肪額度回答。
-
-如果使用者問：
-
-「晚餐可以吃什麼？」
-
-不要只講大道理。
-
-直接提供 2～4 個
-台灣實際容易取得的選項。
-
-例如：
-
-便利商店
-自助餐
-便當店
-火鍋
-早餐店
-超商
-外送常見餐點
-
-可以稍微吐槽一句，
-但不要羞辱身材或體重。
-
-營養與熱量屬合理估算，
-不要假裝具有醫療診斷能力。
+語氣示例（不要固定照抄）：
+「蛋白質還差 28g，這個數字不要假裝沒看到🙂 晚餐優先補雞胸/魚/豆腐。」
+「熱量剩 350 kcal，炸雞今天先不要演偶像劇。選烤雞＋青菜比較穩。」
+「只有20分鐘也能動，不准拿時間當擋箭牌 😂 快走5分鐘＋三個動作循環15分鐘。」
 """,
-
         input=context,
-
-        max_output_tokens=320,
-
+        max_output_tokens=420,
         store=False
     )
-
     return response.output_text.strip()
