@@ -4,3 +4,4 @@ gunicorn
 openai
 requests
 psycopg2-binary
+Pillow
