@@ -30,6 +30,7 @@ from linebot.v3.webhooks import (
 
 from food_ai import (
     analyze_food_image,
+    analyze_food_text,
     correct_food_analysis,
     add_food_to_analysis,
     classify_user_text,
@@ -96,7 +97,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V5.3 is running!"
+    return "LINE Food AI Bot V5.4 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -165,7 +166,7 @@ def social_reply(text):
 
     greetings = [
         "嗨", "嗨嗨", "哈囉", "哈啰", "hello", "hi", "hey",
-        "安安", "你好", "在嗎", "在嘛", "有人嗎",
+        "安安", "你好", "在嗎", "在嘛", "有人嗎","我來了",
     ]
 
     if lower in greetings:
@@ -174,9 +175,11 @@ def social_reply(text):
             "有～我在 😎 今天吃了什麼就丟過來，我幫你記。",
             "哈囉 👋 今天也要記得顧一下熱量跟蛋白質，不准裝沒看到。",
             "在啦 😂 要記飲食、看今天剩多少，還是想找東西吃？",
+             "還以為你早就把我忘到九霄雲外去，打算徹底放飛自我了呢！這次過來，是終於肯好好面對今天的飲食紀錄了，還是又默默吃了什麼壞東西不敢面對啊🧐？🔥？",
+            "唷 終於肯打開我了，原來你還會在乎你的身體和飲食🧐？",
         ])
 
-    if any(word in raw for word in ["早安", "早ㄤ", "早上好"]):
+    if any(word in raw for word in ["早安", "早ㄤ", "早上好","早"]):
         return random.choice([
             "早安 ☀️ 新的一天重新算，早餐吃了記得拍給我。",
             "早～☀️ 昨天不管吃怎樣今天都正常吃，別搞絕食補償。早餐交出來🙂",
@@ -195,6 +198,7 @@ def social_reply(text):
             "不客氣 😎 記得真的照做，不是看完建議就算完成喔。",
             "可以～有吃東西再丟給我 📸",
             "免客氣，下一餐繼續交作業🙂",
+            "你居然也懂得感激我，中國人飛上天了嗎?🙂",
         ])
 
     return None
@@ -228,7 +232,7 @@ def totals_to_dict(totals):
 
 def compact_ai_text(text, max_lines=7, max_chars=420):
     if not text:
-        return "我剛剛沒整理出答案，再問我一次 😵‍💫"
+        return "我剛剛沒整理出答案，拜託再問我一次 😵‍💫"
 
     cleaned = str(text)
     for mark in ["**", "###", "##", "#"]:
@@ -1215,9 +1219,11 @@ def water_target_from_text(text):
 def usage_help():
     return (
         "📖 BOT 使用說明\n\n"
-        "📸 記錄飲食\n"
-        "直接傳餐點照片，我會辨識並記進今天帳本。\n"
-        "例：『剛剛飯只吃一半』『那不是肉，是豆干』\n\n"
+        "📸／⌨️ 記錄飲食\n"
+        "可以傳餐點照片，也可以直接打字。\n"
+        "例：『早餐吃蛋餅豆漿』\n"
+        "也能一次說：『早餐吃蛋，中午雞胸便當，晚餐鮭魚地瓜』\n"
+        "修正例：『剛剛飯只吃一半』『那不是肉，是豆干』\n\n"
         "📊 今日進度\n"
         "『今天還能吃多少？』『蛋白質還差多少？』\n\n"
         "🍱 吃什麼\n"
@@ -1340,8 +1346,9 @@ def rich_menu_today_reply(user_id):
 
 def rich_menu_food_entry_reply():
     return (
-        "📸 記錄飲食\n\n"
-        "直接把這餐的照片傳給我就好，我會幫你辨識、估份量並記進今天帳本。\n\n"
+        "📸／⌨️ 記錄飲食\n\n"
+        "傳餐點照片，或直接打字告訴我吃了什麼，我都可以幫你記。\n"
+        "也可以一次輸入早餐、午餐、晚餐，我會自動拆開。\n\n"
         "拍清楚一點，我比較不會把豆干認成肉🙂\n"
         "如果份量或食物猜錯，直接跟我說：\n"
         "「飯只有半碗」／「那是豆干不是肉」／「這杯我沒喝」"
@@ -1526,7 +1533,7 @@ def handle_text(event):
             return
 
         if has_plain_water_context(text) and any(
-            phrase in text for phrase in ["我今天有喝水", "今天有喝水", "有喝水", "喝了水", "剛剛喝水"]
+            phrase in text for phrase in ["我今天有喝水", "今天有喝水", "有喝水", "喝了水", "剛剛喝水","喝水"]
         ) and extract_water_amount(text) is None:
             reply_text(
                 event.reply_token,
@@ -1541,7 +1548,7 @@ def handle_text(event):
                 reply_text(
                     event.reply_token,
                     "💧 有喝很好，但容量要告訴我，不然我不能通靈🙂\n"
-                    "例如：『喝了300ml』"
+                    "例如：『喝了300ml的水』"
                 )
                 return
 
@@ -1817,6 +1824,80 @@ def handle_text(event):
         intent_data = classify_user_text(text)
         intent = intent_data.get("intent")
 
+        # -------------------------------------------------
+        # V5.4 文字飲食紀錄：支援單餐 / 一次多餐
+        # -------------------------------------------------
+
+        if intent == "meal_log":
+            meals = intent_data.get("meals") or []
+            target_date = intent_data.get("target_date")
+
+            # V5.4 第一階段先正式支援「今天」文字記餐。
+            # 昨日補登會在 database.py V5.4 接上指定日期後開放，避免嘴上說昨天卻寫進今天。
+            if target_date == "昨天" or "昨天" in text or "昨日" in text:
+                reply_text(
+                    event.reply_token,
+                    "📅 我有看懂你是在補昨天的飲食，但目前先不亂寫進今天。\n"
+                    "下一版資料庫接上指定日期後，就會直接幫你補登昨天。",
+                )
+                return
+
+            if not meals:
+                reply_text(
+                    event.reply_token,
+                    "🍱 我知道你是在記飲食，但這句我沒拆出食物內容。\n"
+                    "可以直接說：『早餐吃蛋餅豆漿』，或一次把早餐、午餐、晚餐都告訴我。",
+                )
+                return
+
+            start_loading(user_id, 60)
+            saved = []
+
+            for meal in meals[:4]:
+                meal_type = meal.get("meal_type") or "點心"
+                meal_text = str(meal.get("text") or "").strip()
+                if not meal_text:
+                    continue
+
+                food_data = analyze_food_text(meal_text, meal_type)
+                food_data["meal_type"] = meal_type
+                save_meal(user_id, food_data, meal_type=meal_type)
+                saved.append((meal_type, food_data))
+
+            if not saved:
+                reply_text(event.reply_token, "🍱 這次沒有成功拆出可記錄的餐點，再換個說法給我一次。")
+                return
+
+            totals = totals_to_dict(get_today_totals(user_id))
+            lines = [f"✅ 已記錄 {len(saved)} 餐"]
+            for meal_type, data in saved:
+                total = data.get("total") or {}
+                name = data.get("meal_name") or "這一餐"
+                lines.append(f"{meal_type}｜{name}　🔥 {round(number(total.get('calories')))} kcal")
+
+            lines.extend([
+                "──────────",
+                f"📊 今日累計 🔥 {round(totals['calories'])} kcal",
+                f"🥩 {round(totals['protein'], 1)}g｜🍚 {round(totals['carbs'], 1)}g｜🥑 {round(totals['fat'], 1)}g",
+            ])
+
+            # 多餐只回一份精簡總結，避免 LINE 一次噴三四張卡，也節省輸出。
+            if len(saved) >= 3:
+                lines.append(random.choice([
+                    "三餐一次交作業，可以，今天效率有料 😎",
+                    "本來應該一餐一餐記，結果你直接從從容容一次交齊 😂",
+                    "整天一次報帳成功。這次不是匆匆忙忙連滾帶爬了🙂",
+                ]))
+            elif len(saved) == 1:
+                lines.append(random.choice([
+                    "記好了，吃過的就誠實面對帳本🙂",
+                    "收到，這餐已入帳。熱量沒有失憶的機會 😂",
+                    "好，這餐我已經幫你記錄了。",
+                ]))
+
+            reply_text(event.reply_token, "\n".join(lines))
+            return
+
         if intent == "profile":
             incoming = intent_data.get("profile") or {}
             updates = {}
@@ -1884,7 +1965,7 @@ def handle_text(event):
             update_meal(last_meal["id"], corrected_data)
 
             memory_keywords = [
-                "常喝", "常吃", "固定", "記住",
+                "常喝", "常吃", "固定", "記住","每天吃",
                 "以後都是", "每次都是", "平常都",
             ]
 
@@ -2030,7 +2111,8 @@ def handle_sticker(event):
         "貼圖很會喔🙂 今天飲食有乖乖記嗎？",
         "好啦有看到 😂 要查今天進度就跟我說「今天還能吃多少」。",
         "我也想回你一張，但先把正事顧好 😎 吃飯記得拍。",
-        "可以，這張我收下 😂 今天要吃什麼也可以直接問我。",
+        "什麼意思? 想要跟我圖戰是不是🙊 來啊who怕who 線下單挑減肥敢不敢🥱。",
+        "你好 緩光臨~ 今天要吃什麼也可以直接問我喔💖。",
     ]
     reply_text(event.reply_token, random.choice(replies))
 
