@@ -1,13 +1,8 @@
-
 import os
 import base64
 import json
 from openai import OpenAI
 
-
-# =========================================================
-# OpenAI
-# =========================================================
 
 client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"]
@@ -15,331 +10,158 @@ client = OpenAI(
 
 
 # =========================================================
-# 食物影像辨識核心
+# 第一層：視覺食物辨識
 # =========================================================
 
-FOOD_VISION_PROMPT = """
-你是一個專門為台灣使用者設計的 AI 飲食影像辨識系統。
-
-你的核心目標是：
-
-「快速、準確、有判斷力地辨識使用者正在吃什麼。」
-
-你不是鑑識人員。
-你不是在列舉所有理論可能性。
-你是日常飲食紀錄助手。
-
-━━━━━━━━━━━━━━━━━━
-【1. 最重要：做出合理判斷】
-━━━━━━━━━━━━━━━━━━
-
-當圖片中的視覺證據已經足以支持一個明顯答案時，
-直接給出答案。
-
-不要因為存在極低機率的其他可能性，
-就列出一大串候選。
-
-例如：
-
-一個大小、形狀、質地、餐飲情境
-都明顯符合去殼水煮蛋的食物，
-
-應直接判斷：
-
-「水煮蛋」
-
-不要回答：
-
-「可能是水煮蛋、魚丸、麻糬、饅頭。」
-
-這種回答對飲食紀錄沒有幫助。
-
-━━━━━━━━━━━━━━━━━━
-【2. 使用餐飲情境推理】
-━━━━━━━━━━━━━━━━━━
-
-這些照片是使用者主動傳來的「餐點照片」。
-
-因此辨識時應綜合：
-
-• 食物外觀
-• 大小
-• 形狀
-• 顏色
-• 表面質地
-• 切面
-• 烹調痕跡
-• 容器
-• 餐具
-• 同盤其他食物
-• 早餐／午餐／晚餐情境
-• 台灣人的常見飲食習慣
-
-不要只依靠單一視覺特徵。
-
-━━━━━━━━━━━━━━━━━━
-【3. 熟悉台灣食物】
-━━━━━━━━━━━━━━━━━━
-
-你應特別熟悉：
+VISION_PROMPT = """
+你是專門辨識台灣日常飲食照片的 AI 視覺系統。
 
-水煮蛋
-茶葉蛋
-荷包蛋
-炒蛋
-蛋餅
-蔥抓餅
-蘿蔔糕
-飯糰
-饅頭
-包子
-吐司
-三明治
-地瓜
-玉米
+目前只執行第一層任務：
 
-白飯
-糙米飯
-雞肉飯
-滷肉飯
-便當
-壽司
-御飯糰
+「看懂照片裡實際有哪些食物與飲料。」
 
-雞胸肉
-舒肥雞胸
-雞腿
-排骨
-豬里肌
-牛肉
-鮭魚
-鯖魚
+此階段不要計算熱量、營養素，
+不要提供健康建議，也不要寫長篇解釋。
 
-豆腐
-豆干
-毛豆
+【核心原則】
 
-花椰菜
-高麗菜
-地瓜葉
-空心菜
-青江菜
-菠菜
-菇類
+1. 先看完整畫面，再辨識個別食物。
 
-水餃
-鍋貼
-乾麵
-湯麵
-牛肉麵
+2. 綜合判斷：
+- 形狀
+- 顏色
+- 質地
+- 切面
+- 大小比例
+- 數量
+- 烹調痕跡
+- 容器
+- 餐具
+- 同盤食物
+- 台灣飲食情境
 
-無糖豆漿
-有糖豆漿
-鮮奶
-拿鐵
-美式咖啡
-奶茶
-茶飲
+3. 這是「飲食紀錄」情境，不是物體鑑識。
 
-以及台灣早餐店、便利商店、
-自助餐、便當店、健身餐常見食物。
+如果一個答案明顯最合理，
+直接採用最可能答案。
 
-但「常見程度」只能輔助判斷，
-仍然必須尊重圖片中的視覺證據。
+例如視覺、尺寸、形狀與餐飲情境
+都高度符合去殼水煮蛋：
 
-━━━━━━━━━━━━━━━━━━
-【4. 不要過度保守】
-━━━━━━━━━━━━━━━━━━
+直接辨識為「水煮蛋」。
 
-如果最可能答案非常明顯：
+不要為了理論上的極低機率，
+另外列出麻糬、魚丸、饅頭等候選。
 
-直接判斷。
+4. 對台灣常見食物要有良好的判斷力。
 
-confidence 可以反映你的把握程度，
-不需要用文字一直道歉或懷疑。
+包括但不限於：
 
-只有以下情況才需要使用者確認：
+水煮蛋、茶葉蛋、荷包蛋、炒蛋、
+蛋餅、蔥抓餅、蘿蔔糕、飯糰、
+饅頭、包子、吐司、三明治、
+地瓜、玉米、
 
-A. 圖片真的模糊到無法辨認
-B. 食物被嚴重遮住
-C. 兩種食物外觀真的高度相似
-D. 不同答案會造成很大的營養差異
-E. confidence < 0.55
+白飯、糙米飯、雞肉飯、滷肉飯、
+便當、壽司、御飯糰、
 
-如果 confidence >= 0.75，
-通常不要詢問使用者。
+雞胸肉、舒肥雞胸、雞腿、排骨、
+豬肉、牛肉、鮭魚、鯖魚、蝦、
 
-如果 confidence >= 0.90，
-直接視為高可信辨識。
+豆腐、豆干、毛豆、
 
-━━━━━━━━━━━━━━━━━━
-【5. 飲料規則】
-━━━━━━━━━━━━━━━━━━
+花椰菜、高麗菜、空心菜、
+地瓜葉、青江菜、菠菜、菇類、
 
-不要因為液體是白色，
-就擅自判定成豆漿或牛奶。
+水餃、鍋貼、乾麵、湯麵、牛肉麵、
 
-如果有：
+豆漿、鮮奶、拿鐵、美式咖啡、
+奶茶、茶飲等。
 
-• 杯身標籤
-• 包裝文字
-• 品牌資訊
-• 明顯顏色
-• 飲料特徵
+5. 數量能數就直接數。
 
-可以合理判斷，再辨識具體品項。
+看到三顆水煮蛋：
+quantity = 3
+unit = "顆"
 
-否則可以寫：
+不要寫成「1份」。
 
-「飲料」
+6. 估計重量時不要假裝過度精確。
 
-並降低 confidence。
+能合理估計：
+estimated_grams 填數值。
 
-━━━━━━━━━━━━━━━━━━
-【6. 數量】
-━━━━━━━━━━━━━━━━━━
+無法合理估計：
+estimated_grams = null。
 
-能直接數出數量時，
-一定要數。
+7. confidence 是你對食物名稱辨識的信心。
 
-例如：
+0.95～1.00：幾乎確定
+0.85～0.94：非常有把握
+0.75～0.84：合理有把握
+0.55～0.74：存在明顯不確定性
+低於 0.55：真的難以辨識
 
-圖片有 3 顆水煮蛋
+對典型、清楚、常見食物，
+不要刻意降低 confidence。
 
-→ quantity = 3
-→ unit = 顆
+8. needs_confirmation 預設為 false。
 
-不要把三顆蛋寫成：
+只有：
+- 圖片真的太模糊
+- 食物嚴重遮擋
+- 兩種合理答案真的難以區分
+- 判斷錯誤會大幅影響後續營養計算
+- 主要食物 confidence < 0.55
 
-quantity = 1
-unit = 份
+才設為 true。
 
-━━━━━━━━━━━━━━━━━━
-【7. 份量】
-━━━━━━━━━━━━━━━━━━
+不要對明顯答案反覆詢問使用者。
 
-合理估計：
+9. 飲料要特別注意。
 
-g
-ml
-顆
-片
-碗
-杯
-份
-根
+如果有包裝、文字、品牌或明顯特徵，
+可以辨識具體飲品。
 
-如果圖片沒有可靠比例尺，
-estimated_grams 可以是 null。
+如果單靠圖片無法知道內容物，
+請寫「飲料」，
+不要因為液體是白色就直接猜豆漿或牛奶。
 
-不要為了看起來專業，
-製造假的精確重量。
+10. 不要幻想圖片中沒有的東西。
 
-━━━━━━━━━━━━━━━━━━
-【8. confidence】
-━━━━━━━━━━━━━━━━━━
-
-每項食物給 0～1 的 confidence。
-
-參考：
-
-0.95～1.00
-幾乎確定
-
-0.85～0.94
-非常有把握
-
-0.75～0.84
-合理有把握
-
-0.55～0.74
-存在一定不確定性
-
-< 0.55
-才需要考慮詢問使用者
-
-不要因為圖片不是攝影棚等級，
-就把正常明顯食物的 confidence 壓得很低。
-
-━━━━━━━━━━━━━━━━━━
-【9. 目前不要計算營養】
-━━━━━━━━━━━━━━━━━━
-
-這個階段只負責：
-
-「看懂照片裡有什麼。」
-
-不要：
-
-• 計算熱量
-• 計算蛋白質
-• 計算脂肪
-• 計算碳水
-• 提供飲食建議
-• 寫長篇分析
-
-營養計算會由下一個系統負責。
-
-━━━━━━━━━━━━━━━━━━
-【10. 最終原則】
-━━━━━━━━━━━━━━━━━━
-
-你的排序是：
-
-1. 正確
-2. 快速
-3. 有判斷力
-4. 簡潔
-5. 必要時才詢問
-
-明顯答案就直接回答。
-
-不要把簡單的食物辨識，
-變成多選題。
+輸出只描述實際看見或
+有充分視覺依據判斷的食物。
 """
 
 
 # =========================================================
-# Structured Output Schema
+# 第一層輸出格式
 # =========================================================
 
-FOOD_SCHEMA = {
+VISION_SCHEMA = {
     "type": "object",
-
     "properties": {
-
         "foods": {
             "type": "array",
-
             "items": {
                 "type": "object",
-
                 "properties": {
-
                     "name": {
                         "type": "string"
                     },
-
                     "quantity": {
                         "type": "number"
                     },
-
                     "unit": {
                         "type": "string"
                     },
-
                     "estimated_grams": {
-                        "type": [
-                            "number",
-                            "null"
-                        ]
+                        "type": ["number", "null"]
                     },
-
                     "confidence": {
                         "type": "number"
                     }
                 },
-
                 "required": [
                     "name",
                     "quantity",
@@ -347,43 +169,33 @@ FOOD_SCHEMA = {
                     "estimated_grams",
                     "confidence"
                 ],
-
                 "additionalProperties": False
             }
         },
-
         "needs_confirmation": {
             "type": "boolean"
         },
-
         "confirmation_question": {
-            "type": [
-                "string",
-                "null"
-            ]
+            "type": ["string", "null"]
         }
     },
-
     "required": [
         "foods",
         "needs_confirmation",
         "confirmation_question"
     ],
-
     "additionalProperties": False
 }
 
 
 # =========================================================
-# 圖片 → AI 食物辨識
+# 執行第一層辨識
 # =========================================================
 
-def analyze_food_image(
+def recognize_foods(
     image_bytes,
     content_type="image/jpeg"
 ):
-
-    # 圖片轉 Base64
     image_base64 = base64.b64encode(
         image_bytes
     ).decode("utf-8")
@@ -393,27 +205,20 @@ def analyze_food_image(
         f"{image_base64}"
     )
 
-    # 呼叫 OpenAI
     response = client.responses.create(
-
-        # 先以辨識品質為主。
-        # 之後我們會實測速度與成本再調整模型。
         model="gpt-5.6",
 
-        instructions=FOOD_VISION_PROMPT,
+        instructions=VISION_PROMPT,
 
         input=[
             {
                 "role": "user",
-
                 "content": [
-
                     {
                         "type": "input_text",
                         "text":
-                        "請辨識這張餐點照片。"
+                        "辨識這張飲食照片中的食物與飲料。"
                     },
-
                     {
                         "type": "input_image",
                         "image_url": data_url,
@@ -425,16 +230,10 @@ def analyze_food_image(
 
         text={
             "format": {
-
                 "type": "json_schema",
-
-                "name":
-                "food_recognition",
-
+                "name": "food_vision",
                 "strict": True,
-
-                "schema":
-                FOOD_SCHEMA
+                "schema": VISION_SCHEMA
             }
         }
     )
@@ -445,95 +244,51 @@ def analyze_food_image(
 
 
 # =========================================================
-# JSON → LINE 好讀文字
+# 暫時的測試顯示
 # =========================================================
 
-def format_food_result(data):
-
-    foods = data.get(
-        "foods",
-        []
-    )
+def format_recognition_result(data):
+    foods = data.get("foods", [])
 
     if not foods:
-
         return (
-            "📷 這張照片裡我沒有找到"
-            "明確的餐點。\n"
-            "換個角度拍給我看看 👀"
+            "👀 我這張沒有抓到明確的食物，"
+            "換個角度再給我看一次。"
         )
 
     lines = [
-        "🍱 我看到了！",
+        "👀 第一層辨識完成",
         ""
     ]
 
     for food in foods:
-
-        name = food["name"]
         quantity = food["quantity"]
-        unit = food["unit"]
-        confidence = food["confidence"]
 
-        # 2.0 → 2
-        if isinstance(
-            quantity,
-            float
-        ) and quantity.is_integer():
+        if (
+            isinstance(quantity, float)
+            and quantity.is_integer()
+        ):
+            quantity = int(quantity)
 
-            quantity = int(
-                quantity
-            )
-
-        confidence_percent = round(
-            confidence * 100
+        confidence = round(
+            food["confidence"] * 100
         )
-
-        # 高可信度不用一直秀百分比
-        if confidence >= 0.85:
-
-            line = (
-                f"✓ {name} × "
-                f"{quantity}{unit}"
-            )
-
-        else:
-
-            line = (
-                f"• {name} × "
-                f"{quantity}{unit}"
-                f"（約 {confidence_percent}%）"
-            )
 
         lines.append(
-            line
+            f"✓ {food['name']} × "
+            f"{quantity}{food['unit']} "
+            f"｜{confidence}%"
         )
 
-    # 真的不確定才問
-    if data.get(
-        "needs_confirmation",
-        False
-    ):
-
+    if data.get("needs_confirmation"):
         question = data.get(
             "confirmation_question"
         )
 
         if question:
-
             lines.extend([
                 "",
-                "🤔 有一個地方我想確認：",
-                question
+                f"🤔 {question}"
             ])
 
-    else:
-
-        lines.extend([
-            "",
-            "👌 看起來沒問題。"
-        ])
-
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
