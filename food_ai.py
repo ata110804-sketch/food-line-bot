@@ -1,1077 +1,587 @@
 import os
 import base64
 import json
+import time
+import requests
+
+from flask import Flask, request, abort
 from openai import OpenAI
 
-
-client = OpenAI(
-    api_key=os.environ["OPENAI_API_KEY"]
+from linebot.v3 import WebhookHandler
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.messaging import (
+    ApiClient,
+    Configuration,
+    MessagingApi,
+    ReplyMessageRequest,
+    TextMessage,
+    FlexMessage,
+    FlexContainer,
+)
+from linebot.v3.webhooks import (
+    MessageEvent,
+    TextMessageContent,
+    ImageMessageContent,
 )
 
 
 # =========================================================
-# 第一層：視覺食物辨識
+# 基本設定
 # =========================================================
 
-VISION_PROMPT = """
-你是專門辨識台灣日常飲食照片的 AI 視覺系統。
+app = Flask(__name__)
 
-目前只執行第一層任務：
+LINE_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
-「看懂照片裡實際有哪些食物與飲料。」
+configuration = Configuration(access_token=LINE_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-此階段不要計算熱量、營養素，
-不要提供健康建議，也不要寫長篇解釋。
 
-【核心原則】
+# =========================================================
+# AI 分析 Prompt
+# =========================================================
 
-1. 先看完整畫面，再辨識個別食物。
+FOOD_ANALYSIS_PROMPT = """
+你是一位專門服務台灣使用者的 AI 飲食辨識與營養分析助手。
 
-2. 綜合判斷：
-- 形狀
-- 顏色
-- 質地
-- 切面
-- 大小比例
-- 數量
-- 烹調痕跡
-- 容器
-- 餐具
-- 同盤食物
-- 台灣飲食情境
+你的工作流程必須分成兩層：
 
-3. 這是「飲食紀錄」情境，不是物體鑑識。
+第一層：辨識照片中的食物與料理
+第二層：理解料理的常見原料、烹調方式與份量，再估算營養
 
-如果一個答案明顯最合理，
-直接採用最可能答案。
+不要只看顏色或形狀直接猜。
 
-例如視覺、尺寸、形狀與餐飲情境
-都高度符合去殼水煮蛋：
+例如看到一塊肉，應綜合：
+肉的形狀、纖維、油脂分布、厚度、烹調痕跡、
+配菜、餐具、餐廳料理情境等判斷。
 
-直接辨識為「水煮蛋」。
+使用者主要在台灣，因此應熟悉台灣常見：
+早餐店、便當、自助餐、超商、夜市、火鍋、
+日式定食、韓式料理、西式餐點、健身餐等。
 
-不要為了理論上的極低機率，
-另外列出麻糬、魚丸、饅頭等候選。
+如果照片中的食物具有明顯特徵，
+直接採用最合理答案，不要過度猶豫。
 
-4. 對台灣常見食物要有良好的判斷力。
+只有在真的無法合理判斷時才標示不確定。
 
-包括但不限於：
+份量估算要參考：
+餐盤、碗、杯子、筷子、湯匙及其他食物比例。
 
-水煮蛋、茶葉蛋、荷包蛋、炒蛋、
-蛋餅、蔥抓餅、蘿蔔糕、飯糰、
-饅頭、包子、吐司、三明治、
-地瓜、玉米、
+不要製造假精確度。
 
-白飯、糙米飯、雞肉飯、滷肉飯、
-便當、壽司、御飯糰、
+請輸出純 JSON。
+不要 Markdown。
+不要 ```json。
 
-雞胸肉、舒肥雞胸、雞腿、排骨、
-豬肉、牛肉、鮭魚、鯖魚、蝦、
+格式必須完全符合：
 
-豆腐、豆干、毛豆、
+{
+  "meal_name": "餐點簡稱",
+  "foods": [
+    {
+      "name": "食物名稱",
+      "quantity": "約1份",
+      "calories": 300,
+      "protein": 20,
+      "carbs": 30,
+      "fat": 10,
+      "fiber": 2,
+      "sodium": 500
+    }
+  ],
+  "total": {
+    "calories": 500,
+    "protein": 30,
+    "carbs": 50,
+    "fat": 20,
+    "fiber": 5,
+    "sodium": 1000
+  },
+  "confidence": "high",
+  "comment": "一句自然、簡短、有朋友感的飲食評語"
+}
 
-花椰菜、高麗菜、空心菜、
-地瓜葉、青江菜、菠菜、菇類、
+規則：
 
-水餃、鍋貼、乾麵、湯麵、牛肉麵、
-
-豆漿、鮮奶、拿鐵、美式咖啡、
-奶茶、茶飲等。
-
-5. 數量能數就直接數。
-
-看到三顆水煮蛋：
-quantity = 3
-unit = "顆"
-
-不要寫成「1份」。
-
-6. 估計重量時不要假裝過度精確。
-
-能合理估計：
-estimated_grams 填數值。
-
-無法合理估計：
-estimated_grams = null。
-
-7. confidence 是你對食物名稱辨識的信心。
-
-0.95～1.00：幾乎確定
-0.85～0.94：非常有把握
-0.75～0.84：合理有把握
-0.55～0.74：存在明顯不確定性
-低於 0.55：真的難以辨識
-
-對典型、清楚、常見食物，
-不要刻意降低 confidence。
-
-8. needs_confirmation 預設為 false。
-
-只有：
-- 圖片真的太模糊
-- 食物嚴重遮擋
-- 兩種合理答案真的難以區分
-- 判斷錯誤會大幅影響後續營養計算
-- 主要食物 confidence < 0.55
-
-才設為 true。
-
-不要對明顯答案反覆詢問使用者。
-
-9. 飲料要特別注意。
-
-如果有包裝、文字、品牌或明顯特徵，
-可以辨識具體飲品。
-
-如果單靠圖片無法知道內容物，
-請寫「飲料」，
-不要因為液體是白色就直接猜豆漿或牛奶。
-
-10. 不要幻想圖片中沒有的東西。
-
-輸出只描述實際看見或
-有充分視覺依據判斷的食物。
+1. calories 為 kcal
+2. protein、carbs、fat、fiber 為 g
+3. sodium 為 mg
+4. 所有營養數值都必須是數字
+5. foods 加總必須與 total 大致一致
+6. comment 最多約 45 個中文字
+7. comment 可以有一點朋友式吐槽，但不要羞辱使用者
+8. 不要把免責聲明放進 comment
+9. 不要輸出 JSON 以外的內容
 """
 
 
 # =========================================================
-# 第一層輸出格式
+# LINE 基礎功能
 # =========================================================
 
-VISION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "foods": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string"
-                    },
-                    "quantity": {
-                        "type": "number"
-                    },
-                    "unit": {
-                        "type": "string"
-                    },
-                    "estimated_grams": {
-                        "type": ["number", "null"]
-                    },
-                    "confidence": {
-                        "type": "number"
-                    }
-                },
-                "required": [
-                    "name",
-                    "quantity",
-                    "unit",
-                    "estimated_grams",
-                    "confidence"
-                ],
-                "additionalProperties": False
-            }
-        },
-        "needs_confirmation": {
-            "type": "boolean"
-        },
-        "confirmation_question": {
-            "type": ["string", "null"]
-        }
-    },
-    "required": [
-        "foods",
-        "needs_confirmation",
-        "confirmation_question"
-    ],
-    "additionalProperties": False
-}
+@app.route("/", methods=["GET"])
+def home():
+    return "LINE Food AI Bot is running!"
 
 
-# =========================================================
-# 執行第一層辨識
-# =========================================================
+@app.route("/callback", methods=["POST"])
+def callback():
 
-def recognize_foods(
-    image_bytes,
-    content_type="image/jpeg"
-):
-    image_base64 = base64.b64encode(
-        image_bytes
-    ).decode("utf-8")
+    signature = request.headers.get("X-Line-Signature", "")
+    body = request.get_data(as_text=True)
 
-    data_url = (
-        f"data:{content_type};base64,"
-        f"{image_base64}"
-    )
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
 
-    response = client.responses.create(
-        model="gpt-5.6",
-
-        instructions=VISION_PROMPT,
-
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text":
-                        "辨識這張飲食照片中的食物與飲料。"
-                    },
-                    {
-                        "type": "input_image",
-                        "image_url": data_url,
-                        "detail": "high"
-                    }
-                ]
-            }
-        ],
-
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "food_vision",
-                "strict": True,
-                "schema": VISION_SCHEMA
-            }
-        }
-    )
-
-    return json.loads(
-        response.output_text
-    )
+    return "OK"
 
 
-# =========================================================
-# 暫時的測試顯示
-# =========================================================
+def reply_messages(reply_token, messages):
 
-def format_recognition_result(data):
-    foods = data.get("foods", [])
+    with ApiClient(configuration) as api_client:
 
-    if not foods:
-        return (
-            "👀 我這張沒有抓到明確的食物，"
-            "換個角度再給我看一次。"
+        line_bot_api = MessagingApi(api_client)
+
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=messages
+            )
         )
 
-    lines = [
-        "👀 第一層辨識完成",
-        ""
+
+def reply_text(reply_token, text):
+
+    reply_messages(
+        reply_token,
+        [TextMessage(text=text)]
+    )
+
+
+# =========================================================
+# Flex Message 工具
+# =========================================================
+
+def stat_row(icon, label, value):
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "margin": "md",
+        "contents": [
+            {
+                "type": "text",
+                "text": f"{icon} {label}",
+                "size": "md",
+                "color": "#555555",
+                "flex": 4
+            },
+            {
+                "type": "text",
+                "text": str(value),
+                "size": "md",
+                "weight": "bold",
+                "align": "end",
+                "color": "#222222",
+                "flex": 5
+            }
+        ]
+    }
+
+
+def food_row(food):
+
+    name = food.get("name", "餐點")
+    quantity = food.get("quantity", "")
+    calories = round(float(food.get("calories", 0)))
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "margin": "sm",
+        "contents": [
+            {
+                "type": "text",
+                "text": f"• {name} {quantity}",
+                "size": "sm",
+                "color": "#555555",
+                "wrap": True,
+                "flex": 7
+            },
+            {
+                "type": "text",
+                "text": f"{calories} kcal",
+                "size": "sm",
+                "color": "#555555",
+                "align": "end",
+                "flex": 3
+            }
+        ]
+    }
+
+
+def build_food_flex(data, analysis_seconds):
+
+    meal_name = data.get("meal_name", "這一餐")
+    foods = data.get("foods", [])
+    total = data.get("total", {})
+    comment = data.get("comment", "")
+
+    calories = round(float(total.get("calories", 0)))
+    protein = round(float(total.get("protein", 0)), 1)
+    carbs = round(float(total.get("carbs", 0)), 1)
+    fat = round(float(total.get("fat", 0)), 1)
+    fiber = round(float(total.get("fiber", 0)), 1)
+
+    body_contents = [
+        {
+            "type": "text",
+            "text": f"🍱 {meal_name}",
+            "weight": "bold",
+            "size": "xl",
+            "color": "#222222",
+            "wrap": True
+        },
+        {
+            "type": "text",
+            "text": f"🔥 約 {calories} kcal",
+            "weight": "bold",
+            "size": "xxl",
+            "margin": "md",
+            "color": "#333333"
+        },
+        {
+            "type": "separator",
+            "margin": "lg"
+        }
     ]
 
-    for food in foods:
-        quantity = food["quantity"]
-
-        if (
-            isinstance(quantity, float)
-            and quantity.is_integer()
-        ):
-            quantity = int(quantity)
-
-        confidence = round(
-            food["confidence"] * 100
-        )
-
-        lines.append(
-            f"✓ {food['name']} × "
-            f"{quantity}{food['unit']} "
-            f"｜{confidence}%"
-        )
-
-    if data.get("needs_confirmation"):
-        question = data.get(
-            "confirmation_question"
-        )
-
-        if question:
-            lines.extend([
-                "",
-                f"🤔 {question}"
-            ])
-
-    return "\n".join(lines)
-
-
-# =========================================================
-# 第二層：料理 / 原料理解
-# =========================================================
-
-RECIPE_PROMPT = """
-你是熟悉台灣飲食、外食、早餐店、便利商店、
-便當、自助餐與家常料理的料理結構分析系統。
-
-第一層視覺 AI 已經辨識出照片中的食物。
-你現在不需要重新看圖片，也不要推翻第一層的辨識。
-
-你的任務是：
-
-「理解這些食物本身是什麼，以及料理通常由哪些
-具有營養意義的主要成分組成。」
-
-━━━━━━━━━━━━━━━━━━
-【1. 單一食材不要亂拆】
-━━━━━━━━━━━━━━━━━━
-
-如果本身就是單一或接近單一食材，例如：
-
-水煮蛋
-香蕉
-地瓜
-白飯
-玉米
-雞胸肉
-鮭魚
-花椰菜
-豆腐
-毛豆
-
-直接保留這個食物。
-
-例如：
-
-水煮蛋
-→ 水煮蛋
-
-不要拆成：
-蛋白＋蛋黃
-
-香蕉
-→ 香蕉
-
-不要幻想其他成分。
-
-━━━━━━━━━━━━━━━━━━
-【2. 複合料理才拆解】
-━━━━━━━━━━━━━━━━━━
-
-如果是由多種食材組成的料理，
-理解其主要營養來源。
-
-例如：
-
-原味蛋餅
-→ 蛋餅皮
-→ 雞蛋
-→ 煎製用油
-
-起司蛋餅
-→ 蛋餅皮
-→ 雞蛋
-→ 起司
-→ 煎製用油
-
-鮪魚蛋餅
-→ 蛋餅皮
-→ 雞蛋
-→ 鮪魚
-→ 煎製用油
-→ 可能含少量美乃滋
-
-雞腿便當
-不能只理解成「一個雞腿便當」。
-
-如果第一層已辨識出：
-白飯、雞腿、高麗菜、豆干、滷蛋
-
-就應分別保留這些項目。
-
-━━━━━━━━━━━━━━━━━━
-【3. 區分確定與推定】
-━━━━━━━━━━━━━━━━━━
-
-ingredient_source 必須標示：
-
-"direct"
-= 第一層直接辨識到的食物，
-或該食物本身就是單一食材。
-
-"recipe"
-= 根據料理名稱，可以合理確定的基本組成。
-
-"possible"
-= 常見但不能確定一定存在的成分。
-
-例如鮪魚蛋餅：
-
-蛋餅皮 → recipe
-雞蛋 → recipe
-鮪魚 → recipe
-煎製用油 → recipe
-
-美乃滋 → possible
-
-不要把 possible 當成一定有。
-
-━━━━━━━━━━━━━━━━━━
-【4. 避免重複計算】
-━━━━━━━━━━━━━━━━━━
-
-這非常重要。
-
-如果第一層已經分別辨識：
-
-白飯
-雞腿
-高麗菜
-滷蛋
-
-不要第二層又額外新增：
-
-「雞腿便當」
-
-否則後續熱量會重複計算。
-
-同樣：
-
-如果第一層辨識：
-水煮蛋 × 2
-
-不要再另外新增：
-雞蛋 × 2
-
-保留「水煮蛋 × 2」即可。
-
-━━━━━━━━━━━━━━━━━━
-【5. 烹調方式】
-━━━━━━━━━━━━━━━━━━
-
-盡可能判斷或推定：
-
-boiled = 水煮
-steamed = 蒸
-grilled = 烤
-pan_fried = 煎
-stir_fried = 炒
-deep_fried = 油炸
-braised = 滷
-raw = 生食
-unknown = 無法判斷
-
-如果第一層名稱已經明確包含烹調方式：
-
-水煮蛋 → boiled
-炸雞 → deep_fried
-滷蛋 → braised
-
-直接使用。
-
-不要無根據亂猜。
-
-━━━━━━━━━━━━━━━━━━
-【6. 隱藏熱量來源】
-━━━━━━━━━━━━━━━━━━
-
-料理理解時要特別注意：
-
-食用油
-美乃滋
-沙拉醬
-奶油
-起司
-糖
-肉燥
-濃稠醬汁
-花生醬
-芝麻醬
-
-但只有：
-
-料理基本上必然需要
-或
-非常常見且具有營養影響
-
-才列入。
-
-不確定就標示 possible。
-
-━━━━━━━━━━━━━━━━━━
-【7. 台灣飲食情境】
-━━━━━━━━━━━━━━━━━━
-
-你應熟悉台灣常見料理的典型組成，
-但不能因為「通常如此」就假裝照片證明了它。
-
-料理知識是用來補充視覺辨識，
-不是取代視覺證據。
-
-━━━━━━━━━━━━━━━━━━
-【8. 這一層仍然不要算熱量】
-━━━━━━━━━━━━━━━━━━
-
-不要提供：
-
-kcal
-蛋白質
-碳水
-脂肪
-纖維
-鈉
-健康評分
-飲食建議
-
-第三層營養系統會負責。
-
-你的工作只有：
-
-「把食物理解正確，建立可供營養計算的料理結構。」
-"""
-
-
-RECIPE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "original_name": {
-                        "type": "string"
-                    },
-                    "is_composite_dish": {
-                        "type": "boolean"
-                    },
-                    "cooking_method": {
-                        "type": "string",
-                        "enum": [
-                            "boiled",
-                            "steamed",
-                            "grilled",
-                            "pan_fried",
-                            "stir_fried",
-                            "deep_fried",
-                            "braised",
-                            "raw",
-                            "unknown"
-                        ]
-                    },
-                    "ingredients": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {
-                                    "type": "string"
-                                },
-                                "ingredient_source": {
-                                    "type": "string",
-                                    "enum": [
-                                        "direct",
-                                        "recipe",
-                                        "possible"
-                                    ]
-                                },
-                                "quantity_description": {
-                                    "type": [
-                                        "string",
-                                        "null"
-                                    ]
-                                }
-                            },
-                            "required": [
-                                "name",
-                                "ingredient_source",
-                                "quantity_description"
-                            ],
-                            "additionalProperties": False
-                        }
-                    }
-                },
-                "required": [
-                    "original_name",
-                    "is_composite_dish",
-                    "cooking_method",
-                    "ingredients"
-                ],
-                "additionalProperties": False
-            }
-        }
-    },
-    "required": [
-        "items"
-    ],
-    "additionalProperties": False
-}
-
-
-def understand_recipes(vision_data):
-    """
-    第一層辨識結果 → 第二層料理結構
-    """
-
-    food_data = {
-        "foods": vision_data.get(
-            "foods",
-            []
-        )
-    }
-
-    response = client.responses.create(
-        model="gpt-5.6",
-
-        instructions=RECIPE_PROMPT,
-
-        input=[
+    # 食物明細
+    if foods:
+
+        body_contents.append({
+            "type": "text",
+            "text": "這餐我抓到",
+            "size": "sm",
+            "weight": "bold",
+            "color": "#888888",
+            "margin": "lg"
+        })
+
+        for food in foods[:8]:
+            body_contents.append(food_row(food))
+
+        body_contents.append({
+            "type": "separator",
+            "margin": "lg"
+        })
+
+    # 營養數據
+    body_contents.extend([
+        stat_row("🥩", "蛋白質", f"{protein} g"),
+        stat_row("🍚", "碳水", f"{carbs} g"),
+        stat_row("🥑", "脂肪", f"{fat} g"),
+        stat_row("🥬", "膳食纖維", f"{fiber} g"),
+    ])
+
+    # 評語
+    if comment:
+
+        body_contents.extend([
             {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "以下是第一層視覺辨識結果：\n"
-                            + json.dumps(
-                                food_data,
-                                ensure_ascii=False
-                            )
-                            + "\n\n"
-                            "請進行料理與原料結構分析。"
-                        )
-                    }
-                ]
-            }
-        ],
-
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "recipe_understanding",
-                "strict": True,
-                "schema": RECIPE_SCHEMA
-            }
-        }
-    )
-
-    return json.loads(
-        response.output_text
-    )
-
-# =========================================================
-# 第三層：營養估算 / 合理性檢查
-# =========================================================
-
-NUTRITION_PROMPT = """
-你是熟悉台灣飲食的營養估算系統。
-
-你會收到：
-
-1. 第一層的食物辨識結果
-2. 第二層的料理 / 原料理解結果
-
-你的任務是根據：
-食物種類、數量、估計重量、料理組成與烹調方式，
-估算這一餐的營養。
-
-━━━━━━━━━━━━━━━━━━
-【1. 營養項目】
-━━━━━━━━━━━━━━━━━━
-
-每項食物估算：
-
-- 熱量 kcal
-- 蛋白質 protein_g
-- 碳水 carbohydrate_g
-- 脂肪 fat_g
-- 膳食纖維 fiber_g
-- 鈉 sodium_mg
-
-並計算整餐總和。
-
-━━━━━━━━━━━━━━━━━━
-【2. 份量優先】
-━━━━━━━━━━━━━━━━━━
-
-如果第一層有 estimated_grams，
-優先使用重量計算。
-
-如果沒有重量，
-才依照台灣常見份量估計。
-
-例如：
-
-水煮蛋 1 顆
-應以一般雞蛋可食份量估算。
-
-白飯 1 碗
-應以台灣常見一碗熟飯份量估算。
-
-不要假裝知道照片無法支持的精確重量。
-
-━━━━━━━━━━━━━━━━━━
-【3. 複合料理】
-━━━━━━━━━━━━━━━━━━
-
-複合料理使用第二層 ingredients 理解營養來源。
-
-例如：
-
-原味蛋餅：
-蛋餅皮 + 雞蛋 + 合理煎油量
-
-鮪魚蛋餅：
-蛋餅皮 + 雞蛋 + 鮪魚 + 煎油
-possible 的美乃滋不可直接當成確定存在。
-
-ingredient_source = "possible"
-的成分：
-
-如果沒有其他證據，
-不要直接完整計入總熱量。
-
-可以用 uncertainty_note 提醒。
-
-━━━━━━━━━━━━━━━━━━
-【4. 烹調油】
-━━━━━━━━━━━━━━━━━━
-
-煎、炒、炸料理要考慮合理的吸油量。
-
-但不要因為看到「煎」
-就假設使用大量油脂。
-
-依台灣一般餐飲合理估計。
-
-油炸食品則必須考慮吸油造成的熱量。
-
-━━━━━━━━━━━━━━━━━━
-【5. 飲料】
-━━━━━━━━━━━━━━━━━━
-
-如果第一層只能辨識為「飲料」，
-不要擅自猜糖量與營養。
-
-這種情況：
-nutrition_confidence 應降低，
-並在 uncertainty_note 說明
-需要飲料名稱或營養標示才能更準。
-
-如果明確辨識為：
-無糖豆漿、鮮奶、美式咖啡等，
-才可以合理估算。
-
-━━━━━━━━━━━━━━━━━━
-【6. 不製造假精準】
-━━━━━━━━━━━━━━━━━━
-
-這是外食照片估算工具。
-
-營養數值本來就存在誤差。
-
-不要因為 JSON 需要數字，
-就假裝結果精確到實驗室程度。
-
-數字可以使用合理的近似值。
-
-例如：
-76 kcal
-可以。
-
-但不要因為估算而寫：
-76.348 kcal
-
-━━━━━━━━━━━━━━━━━━
-【7. 熱量合理性檢查】
-━━━━━━━━━━━━━━━━━━
-
-完成後必須自行檢查：
-
-蛋白質 × 4
-+
-碳水 × 4
-+
-脂肪 × 9
-
-應與估計熱量大致合理。
-
-因為纖維、酒精、糖醇、標示差異、
-四捨五入等因素，
-不要求完全相等。
-
-但如果差距非常大，
-必須重新檢查估算。
-
-━━━━━━━━━━━━━━━━━━
-【8. 總和檢查】
-━━━━━━━━━━━━━━━━━━
-
-所有 food_items 的：
-
-calories
-protein_g
-carbohydrate_g
-fat_g
-fiber_g
-sodium_mg
-
-加總後，
-應與 totals 大致一致。
-
-禁止前後數字互相矛盾。
-
-━━━━━━━━━━━━━━━━━━
-【9. 營養信心】
-━━━━━━━━━━━━━━━━━━
-
-nutrition_confidence 表示：
-「這項營養估算有多可靠」。
-
-它和第一層的圖片辨識 confidence 不完全相同。
-
-例如：
-
-AI 可能 99% 確定那是蛋餅，
-但不知道早餐店用了多少油。
-
-因此：
-
-food recognition confidence = 高
-nutrition confidence = 中高
-
-這是正常的。
-
-━━━━━━━━━━━━━━━━━━
-【10. 資料來源類型】
-━━━━━━━━━━━━━━━━━━
-
-目前第三層尚未連接正式食品資料庫。
-
-因此 nutrition_source 必須誠實標示：
-
-"ai_estimate"
-
-禁止假裝數值來自：
-政府資料庫
-品牌官方資料
-食品包裝營養標示
-
-未來系統接入正式資料來源後，
-才可以使用其他 source。
-
-━━━━━━━━━━━━━━━━━━
-【11. 不要在這層做人性化聊天】
-━━━━━━━━━━━━━━━━━━
-
-這層只負責可靠的營養資料。
-
-不要：
-
-- 毒舌
-- 稱讚
-- 評分
-- 減肥建議
-- 寫長篇文章
-
-朋友式回覆會由最後的呈現層負責。
-
-專業計算與人格必須分開。
-"""
-
-
-NUTRITION_SCHEMA = {
-    "type": "object",
-    "properties": {
-
-        "food_items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-
-                    "name": {
-                        "type": "string"
-                    },
-
-                    "quantity": {
-                        "type": "number"
-                    },
-
-                    "unit": {
-                        "type": "string"
-                    },
-
-                    "estimated_grams": {
-                        "type": [
-                            "number",
-                            "null"
-                        ]
-                    },
-
-                    "calories": {
-                        "type": "number"
-                    },
-
-                    "protein_g": {
-                        "type": "number"
-                    },
-
-                    "carbohydrate_g": {
-                        "type": "number"
-                    },
-
-                    "fat_g": {
-                        "type": "number"
-                    },
-
-                    "fiber_g": {
-                        "type": "number"
-                    },
-
-                    "sodium_mg": {
-                        "type": "number"
-                    },
-
-                    "nutrition_confidence": {
-                        "type": "number"
-                    },
-
-                    "nutrition_source": {
-                        "type": "string",
-                        "enum": [
-                            "ai_estimate"
-                        ]
-                    },
-
-                    "uncertainty_note": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
-                    }
-                },
-
-                "required": [
-                    "name",
-                    "quantity",
-                    "unit",
-                    "estimated_grams",
-                    "calories",
-                    "protein_g",
-                    "carbohydrate_g",
-                    "fat_g",
-                    "fiber_g",
-                    "sodium_mg",
-                    "nutrition_confidence",
-                    "nutrition_source",
-                    "uncertainty_note"
-                ],
-
-                "additionalProperties": False
-            }
-        },
-
-        "totals": {
-            "type": "object",
-            "properties": {
-
-                "calories": {
-                    "type": "number"
-                },
-
-                "protein_g": {
-                    "type": "number"
-                },
-
-                "carbohydrate_g": {
-                    "type": "number"
-                },
-
-                "fat_g": {
-                    "type": "number"
-                },
-
-                "fiber_g": {
-                    "type": "number"
-                },
-
-                "sodium_mg": {
-                    "type": "number"
-                }
+                "type": "separator",
+                "margin": "lg"
             },
+            {
+                "type": "text",
+                "text": f"💬 {comment}",
+                "size": "sm",
+                "color": "#555555",
+                "wrap": True,
+                "margin": "lg"
+            }
+        ])
 
-            "required": [
-                "calories",
-                "protein_g",
-                "carbohydrate_g",
-                "fat_g",
-                "fiber_g",
-                "sodium_mg"
-            ],
+    body_contents.extend([
+        {
+            "type": "text",
+            "text": f"⚡ 分析約 {analysis_seconds:.1f} 秒",
+            "size": "xs",
+            "color": "#AAAAAA",
+            "margin": "lg"
+        },
+        {
+            "type": "text",
+            "text": "※ 外食份量、用油與醬料為影像估算",
+            "size": "xs",
+            "color": "#AAAAAA",
+            "wrap": True,
+            "margin": "sm"
+        }
+    ])
 
-            "additionalProperties": False
+    flex_json = {
+        "type": "bubble",
+
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": body_contents,
+            "paddingAll": "20px"
         },
 
-        "overall_nutrition_confidence": {
-            "type": "number"
-        },
-
-        "overall_uncertainty_note": {
-            "type": [
-                "string",
-                "null"
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "height": "sm",
+                    "action": {
+                        "type": "message",
+                        "label": "✏️ 修正這餐",
+                        "text": "我要修正上一餐"
+                    }
+                },
+                {
+                    "type": "button",
+                    "style": "secondary",
+                    "height": "sm",
+                    "action": {
+                        "type": "message",
+                        "label": "📋 今日紀錄",
+                        "text": "查看今日紀錄"
+                    }
+                }
             ]
         }
-    },
-
-    "required": [
-        "food_items",
-        "totals",
-        "overall_nutrition_confidence",
-        "overall_uncertainty_note"
-    ],
-
-    "additionalProperties": False
-}
-
-
-def estimate_nutrition(
-    vision_data,
-    recipe_data
-):
-    """
-    第一層 + 第二層
-    → 第三層營養估算
-    """
-
-    analysis_input = {
-        "vision": vision_data,
-        "recipe": recipe_data
     }
 
-    response = client.responses.create(
-        model="gpt-5.6",
-
-        instructions=NUTRITION_PROMPT,
-
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "請根據以下資料估算營養：\n\n"
-                            + json.dumps(
-                                analysis_input,
-                                ensure_ascii=False
-                            )
-                        )
-                    }
-                ]
-            }
-        ],
-
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "nutrition_analysis",
-                "strict": True,
-                "schema": NUTRITION_SCHEMA
-            }
-        }
+    return FlexMessage(
+        alt_text=f"{meal_name}｜約 {calories} kcal",
+        contents=FlexContainer.from_dict(flex_json)
     )
 
-    return json.loads(
-        response.output_text
+
+# =========================================================
+# AI JSON 清理
+# =========================================================
+
+def parse_ai_json(text):
+
+    text = text.strip()
+
+    if text.startswith("```"):
+        text = text.replace("```json", "")
+        text = text.replace("```", "")
+        text = text.strip()
+
+    return json.loads(text)
+
+
+# =========================================================
+# 文字訊息
+# =========================================================
+
+@handler.add(
+    MessageEvent,
+    message=TextMessageContent
+)
+def handle_text(event):
+
+    text = event.message.text.strip()
+
+    if text == "我要修正上一餐":
+
+        reply_text(
+            event.reply_token,
+            "✏️ 可以，直接告訴我哪裡錯。\n\n"
+            "例如：\n"
+            "「那是牛排不是豬排」\n"
+            "「白飯只有半碗」\n"
+            "「飲料是無糖豆漿」\n\n"
+            "下一關我會讓我自己重新算，不准裝死 😌"
+        )
+
+        return
+
+    if text == "查看今日紀錄":
+
+        reply_text(
+            event.reply_token,
+            "📋 今日紀錄功能下一關接上。\n"
+            "到時候早餐、午餐、晚餐會全部自動累計。"
+        )
+
+        return
+
+    reply_text(
+        event.reply_token,
+        "🍱 我現在主要負責顧你的嘴 😂\n\n"
+        "直接傳食物照片給我就好。\n"
+        "我會幫你抓：\n"
+        "🔥 熱量\n"
+        "🥩 蛋白質\n"
+        "🍚 碳水\n"
+        "🥑 脂肪\n"
+        "🥬 膳食纖維\n\n"
+        "其他問題先放過我，我還在上班 😌"
     )
 
+
+# =========================================================
+# 圖片分析
+# =========================================================
+
+@handler.add(
+    MessageEvent,
+    message=ImageMessageContent
+)
+def handle_image(event):
+
+    start_time = time.time()
+
+    try:
+
+        message_id = event.message.id
+
+        # -------------------------------------------------
+        # 從 LINE 下載圖片
+        # -------------------------------------------------
+
+        image_url = (
+            "https://api-data.line.me/"
+            f"v2/bot/message/{message_id}/content"
+        )
+
+        response = requests.get(
+            image_url,
+            headers={
+                "Authorization":
+                f"Bearer {LINE_ACCESS_TOKEN}"
+            },
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+        image_bytes = response.content
+
+        content_type = response.headers.get(
+            "Content-Type",
+            "image/jpeg"
+        )
+
+        # -------------------------------------------------
+        # Base64
+        # -------------------------------------------------
+
+        image_base64 = base64.b64encode(
+            image_bytes
+        ).decode("utf-8")
+
+        data_url = (
+            f"data:{content_type};base64,"
+            f"{image_base64}"
+        )
+
+        # -------------------------------------------------
+        # AI
+        # -------------------------------------------------
+
+        ai_start = time.time()
+
+        ai_response = client.responses.create(
+            model="gpt-5.4-mini",
+
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": FOOD_ANALYSIS_PROMPT
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": data_url,
+                            "detail": "high"
+                        }
+                    ]
+                }
+            ]
+        )
+
+        ai_seconds = time.time() - ai_start
+
+        result_text = ai_response.output_text
+
+        print(
+            "AI_RAW_RESULT:",
+            result_text
+        )
+
+        data = parse_ai_json(
+            result_text
+        )
+
+        total_seconds = time.time() - start_time
+
+        print(
+            f"AI_TIME={ai_seconds:.2f}s "
+            f"TOTAL_TIME={total_seconds:.2f}s"
+        )
+
+        # -------------------------------------------------
+        # Flex Message
+        # -------------------------------------------------
+
+        flex_message = build_food_flex(
+            data,
+            total_seconds
+        )
+
+        reply_messages(
+            event.reply_token,
+            [flex_message]
+        )
+
+    except Exception as e:
+
+        print(
+            "IMAGE_ANALYSIS_ERROR:",
+            repr(e)
+        )
+
+        reply_text(
+            event.reply_token,
+            "🥲 這張我處理到一半翻車了。\n"
+            "先再傳一次給我。\n\n"
+            "如果又翻，我們就去 Render 抓兇手。"
+        )
+
+
+# =========================================================
+# 啟動
+# =========================================================
+
+if __name__ == "__main__":
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
