@@ -1,36 +1,27 @@
 import os
+import base64
+import json
 import requests
-import time
-import threading
 
 from flask import Flask, request, abort
+from openai import OpenAI
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-
 from linebot.v3.messaging import (
     ApiClient,
     Configuration,
     MessagingApi,
     ReplyMessageRequest,
-    PushMessageRequest,
     TextMessage,
+    FlexMessage,
+    FlexContainer,
 )
 
 from linebot.v3.webhooks import (
     MessageEvent,
     TextMessageContent,
     ImageMessageContent,
-)
-
-# =========================================================
-# 三層 AI
-# =========================================================
-
-from food_ai import (
-    recognize_foods,
-    understand_recipes,
-    estimate_nutrition,
 )
 
 
@@ -40,13 +31,9 @@ from food_ai import (
 
 app = Flask(__name__)
 
-LINE_ACCESS_TOKEN = os.environ[
-    "LINE_CHANNEL_ACCESS_TOKEN"
-]
-
-LINE_CHANNEL_SECRET = os.environ[
-    "LINE_CHANNEL_SECRET"
-]
+LINE_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
 configuration = Configuration(
     access_token=LINE_ACCESS_TOKEN
@@ -56,6 +43,167 @@ handler = WebhookHandler(
     LINE_CHANNEL_SECRET
 )
 
+client = OpenAI(
+    api_key=OPENAI_API_KEY
+)
+
+
+# =========================================================
+# AI 食物分析設定
+# =========================================================
+
+FOOD_PROMPT = """
+你是一位專門服務台灣使用者的 AI 飲食辨識與營養分析助手。
+
+你的目標是：
+快速、準確、方便、專業，而且像一個懂營養的朋友。
+
+你必須依照以下順序分析：
+
+第一層：辨識照片中真正出現的食物
+第二層：理解這道料理通常包含哪些原料與烹調方式
+第三層：根據照片中的容器、餐具與比例估算份量
+第四層：估算每項食物的營養
+第五層：加總整餐營養
+
+【辨識原則】
+
+不要只根據顏色或形狀猜食物。
+
+要綜合：
+- 形狀
+- 顏色
+- 表面質地
+- 切面
+- 肉類纖維
+- 油脂分布
+- 烹調痕跡
+- 食物彼此比例
+- 餐具與容器
+- 配菜
+- 台灣常見料理情境
+
+例如：
+
+完整去殼、橢圓形、具有雞蛋典型大小與表面的食物，
+應優先辨識為水煮蛋，而不是因為白色就猜饅頭。
+
+肉排應綜合肉纖維、脂肪、厚度、煎烤痕跡與料理情境，
+判斷牛肉、豬肉或雞肉。
+
+如果視覺證據已經充分，
+直接給最合理的答案，不要一直提出沒有必要的候選。
+
+真的無法合理判斷時才降低信心。
+
+【料理理解】
+
+辨識完食物後，要理解料理。
+
+例如：
+
+蛋餅：
+蛋、餅皮、少量煎油
+
+牛排定食：
+牛排、可能的煎烤油或醬汁，以及照片實際出現的白飯與配菜
+
+滷肉飯：
+白飯、滷肉、醬汁與脂肪
+
+不要加入照片完全沒有依據的食材。
+
+【份量估算】
+
+利用：
+- 碗
+- 盤
+- 杯
+- 筷子
+- 湯匙
+- 便當盒
+- 其他食物
+
+作為尺寸比例。
+
+沒有秤重資訊時，使用合理的台灣外食份量估計。
+
+【營養】
+
+估算：
+- 熱量 kcal
+- 蛋白質 g
+- 碳水化合物 g
+- 脂肪 g
+- 膳食纖維 g
+- 鈉 mg
+
+注意可能的：
+- 煎炒油
+- 醬汁
+- 糖
+- 奶油
+- 美乃滋
+- 起司
+- 炸物吸油
+
+但不要把看不到的油脂誇大計算。
+
+【說話風格】
+
+像懂營養的朋友。
+
+可以幽默、吐槽、微毒舌，
+但不要羞辱使用者的身材、體重或外貌。
+
+例如：
+
+「蛋白質很可以，這餐有在認真做事 😎」
+
+「菜是有出現啦，但這個量比較像來簽到的 😂」
+
+「牛排本人沒什麼問題，醬汁才是躲在後面的熱量刺客。」
+
+【重要】
+
+最後只能輸出合法 JSON。
+不要輸出 Markdown。
+不要輸出 ```json。
+不要在 JSON 前後加任何文字。
+
+格式：
+
+{
+  "meal_name": "餐點簡稱",
+  "foods": [
+    {
+      "name": "食物名稱",
+      "quantity": "約1份",
+      "calories": 300,
+      "protein": 20,
+      "carbs": 30,
+      "fat": 10,
+      "fiber": 2,
+      "sodium": 500
+    }
+  ],
+  "total": {
+    "calories": 500,
+    "protein": 30,
+    "carbs": 50,
+    "fat": 20,
+    "fiber": 5,
+    "sodium": 1000
+  },
+  "confidence": "high",
+  "comment": "一句簡短朋友式飲食評語"
+}
+
+所有營養欄位都必須是數字。
+foods 加總必須和 total 大致一致。
+comment 最多約45個中文字。
+"""
+
 
 # =========================================================
 # 首頁
@@ -63,8 +211,7 @@ handler = WebhookHandler(
 
 @app.route("/", methods=["GET"])
 def home():
-
-    return "LINE Food AI V4 is running!"
+    return "LINE Food AI Bot is running!"
 
 
 # =========================================================
@@ -84,483 +231,375 @@ def callback():
     )
 
     try:
-
         handler.handle(
             body,
             signature
         )
 
     except InvalidSignatureError:
-
         abort(400)
 
     return "OK"
 
 
 # =========================================================
-# LINE 即時回覆
+# LINE 回覆
 # =========================================================
+
+def reply_messages(reply_token, messages):
+
+    with ApiClient(configuration) as api_client:
+
+        api = MessagingApi(api_client)
+
+        api.reply_message(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=messages
+            )
+        )
+
 
 def reply_text(reply_token, text):
 
-    with ApiClient(configuration) as api_client:
-
-        line_bot_api = MessagingApi(
-            api_client
-        )
-
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[
-                    TextMessage(
-                        text=text
-                    )
-                ]
+    reply_messages(
+        reply_token,
+        [
+            TextMessage(
+                text=text
             )
-        )
-
-
-# =========================================================
-# LINE 主動推送
-# AI 分析完成後使用
-# =========================================================
-
-def push_text(user_id, text):
-
-    with ApiClient(configuration) as api_client:
-
-        line_bot_api = MessagingApi(
-            api_client
-        )
-
-        line_bot_api.push_message(
-            PushMessageRequest(
-                to=user_id,
-                messages=[
-                    TextMessage(
-                        text=text
-                    )
-                ]
-            )
-        )
-
-
-# =========================================================
-# LINE 圖片下載
-# =========================================================
-
-def download_line_image(message_id):
-
-    image_url = (
-        "https://api-data.line.me/"
-        f"v2/bot/message/"
-        f"{message_id}/content"
-    )
-
-    response = requests.get(
-        image_url,
-        headers={
-            "Authorization":
-            f"Bearer {LINE_ACCESS_TOKEN}"
-        },
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    image_bytes = response.content
-
-    content_type = response.headers.get(
-        "Content-Type",
-        "image/jpeg"
-    )
-
-    return (
-        image_bytes,
-        content_type
+        ]
     )
 
 
 # =========================================================
-# 數字漂亮顯示
-# 31.0 → 31
-# 31.6 → 31.6
+# JSON 清理
 # =========================================================
 
-def pretty_number(value):
+def parse_ai_json(text):
 
-    if value is None:
+    text = text.strip()
 
-        return "-"
+    if text.startswith("```json"):
+        text = text[7:]
 
-    try:
+    elif text.startswith("```"):
+        text = text[3:]
 
-        value = float(value)
+    if text.endswith("```"):
+        text = text[:-3]
 
-    except (TypeError, ValueError):
-
-        return str(value)
-
-    if value.is_integer():
-
-        return str(
-            int(value)
-        )
-
-    return str(
-        round(value, 1)
+    return json.loads(
+        text.strip()
     )
 
 
 # =========================================================
-# 食物 Emoji
+# Flex Message 元件
 # =========================================================
 
-def food_emoji(name):
+def nutrition_row(icon, label, value):
 
-    name = str(name)
-
-    rules = [
-
-        (
-            ["蛋"],
-            "🥚"
-        ),
-
-        (
-            ["雞", "豬", "牛", "排骨", "肉"],
-            "🥩"
-        ),
-
-        (
-            ["魚", "鮭", "鯖", "蝦", "海鮮"],
-            "🐟"
-        ),
-
-        (
-            ["飯", "米", "飯糰"],
-            "🍚"
-        ),
-
-        (
-            ["麵", "烏龍", "拉麵"],
-            "🍜"
-        ),
-
-        (
-            ["地瓜", "馬鈴薯"],
-            "🍠"
-        ),
-
-        (
-            ["玉米"],
-            "🌽"
-        ),
-
-        (
-            [
-                "菜",
-                "花椰",
-                "菠菜",
-                "高麗",
-                "青江",
-                "生菜"
-            ],
-            "🥬"
-        ),
-
-        (
-            ["豆漿", "牛奶", "鮮奶"],
-            "🥛"
-        ),
-
-        (
-            ["咖啡", "拿鐵"],
-            "☕"
-        ),
-
-        (
-            ["茶", "奶茶", "飲料"],
-            "🧋"
-        ),
-
-        (
-            ["香蕉"],
-            "🍌"
-        ),
-
-        (
-            ["蘋果"],
-            "🍎"
-        ),
-
-        (
-            ["梨"],
-            "🍐"
-        ),
-
-        (
-            ["橘", "柳橙"],
-            "🍊"
-        ),
-
-        (
-            ["麵包", "吐司", "可頌"],
-            "🥐"
-        ),
-
-        (
-            ["豆腐", "豆干"],
-            "🫘"
-        ),
-    ]
-
-    for keywords, emoji in rules:
-
-        for keyword in keywords:
-
-            if keyword in name:
-
-                return emoji
-
-    return "🍴"
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "margin": "md",
+        "contents": [
+            {
+                "type": "text",
+                "text": f"{icon} {label}",
+                "size": "md",
+                "color": "#555555",
+                "flex": 5
+            },
+            {
+                "type": "text",
+                "text": value,
+                "size": "md",
+                "weight": "bold",
+                "align": "end",
+                "color": "#222222",
+                "flex": 5
+            }
+        ]
+    }
 
 
-# =========================================================
-# LINE 餐點結果
-# =========================================================
+def food_row(food):
 
-def build_meal_message(
-    vision_data,
-    nutrition_data,
-    elapsed_seconds
-):
-
-    foods = nutrition_data.get(
-        "food_items",
-        []
+    name = food.get(
+        "name",
+        "食物"
     )
 
-    totals = nutrition_data.get(
-        "totals",
-        {}
-    )
-
-    lines = [
-        "🍱 好，這餐我抓到了！",
+    quantity = food.get(
+        "quantity",
         ""
-    ]
+    )
 
-    # =====================================================
-    # 每項食物
-    # =====================================================
-
-    for food in foods:
-
-        name = food.get(
-            "name",
-            "食物"
-        )
-
-        quantity = pretty_number(
+    calories = round(
+        float(
             food.get(
-                "quantity",
-                1
-            )
-        )
-
-        unit = food.get(
-            "unit",
-            "份"
-        )
-
-        try:
-
-            calories = round(
-                float(
-                    food.get(
-                        "calories",
-                        0
-                    )
-                )
-            )
-
-        except (TypeError, ValueError):
-
-            calories = 0
-
-        emoji = food_emoji(
-            name
-        )
-
-        lines.append(
-            f"{emoji} {name} × "
-            f"{quantity}{unit}"
-            f"｜約 {calories} kcal"
-        )
-
-    # =====================================================
-    # 總營養
-    # =====================================================
-
-    try:
-
-        total_calories = round(
-            float(
-                totals.get(
-                    "calories",
-                    0
-                )
-            )
-        )
-
-    except (TypeError, ValueError):
-
-        total_calories = 0
-
-    lines.extend([
-
-        "",
-
-        "━━━━━━━━━━━━",
-
-        "",
-
-        (
-            "🔥 約 "
-            f"{total_calories} kcal"
-        ),
-
-        (
-            "🥩 蛋白質 "
-            f"{pretty_number(totals.get('protein_g', 0))} g"
-        ),
-
-        (
-            "🍚 碳水 "
-            f"{pretty_number(totals.get('carbohydrate_g', 0))} g"
-        ),
-
-        (
-            "🥑 脂肪 "
-            f"{pretty_number(totals.get('fat_g', 0))} g"
-        ),
-
-        (
-            "🥬 纖維 "
-            f"{pretty_number(totals.get('fiber_g', 0))} g"
-        ),
-
-        (
-            "🧂 鈉 "
-            f"{pretty_number(totals.get('sodium_mg', 0))} mg"
-        ),
-    ])
-
-
-    # =====================================================
-    # 可信度
-    # =====================================================
-
-    try:
-
-        confidence = float(
-            nutrition_data.get(
-                "overall_nutrition_confidence",
+                "calories",
                 0
             )
         )
+    )
 
-    except (TypeError, ValueError):
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "margin": "sm",
+        "contents": [
+            {
+                "type": "text",
+                "text": f"• {name} {quantity}",
+                "size": "sm",
+                "color": "#555555",
+                "wrap": True,
+                "flex": 7
+            },
+            {
+                "type": "text",
+                "text": f"{calories} kcal",
+                "size": "sm",
+                "color": "#555555",
+                "align": "end",
+                "flex": 3
+            }
+        ]
+    }
 
-        confidence = 0
 
+# =========================================================
+# 建立漂亮的飲食卡片
+# =========================================================
 
-    if confidence >= 0.90:
+def build_food_card(data):
 
-        confidence_text = (
-            "這餐我看得滿清楚，"
-            "這次眼睛有帶出門 😎"
+    meal_name = data.get(
+        "meal_name",
+        "這一餐"
+    )
+
+    foods = data.get(
+        "foods",
+        []
+    )
+
+    total = data.get(
+        "total",
+        {}
+    )
+
+    comment = data.get(
+        "comment",
+        ""
+    )
+
+    calories = round(
+        float(
+            total.get(
+                "calories",
+                0
+            )
+        )
+    )
+
+    protein = round(
+        float(
+            total.get(
+                "protein",
+                0
+            )
+        ),
+        1
+    )
+
+    carbs = round(
+        float(
+            total.get(
+                "carbs",
+                0
+            )
+        ),
+        1
+    )
+
+    fat = round(
+        float(
+            total.get(
+                "fat",
+                0
+            )
+        ),
+        1
+    )
+
+    fiber = round(
+        float(
+            total.get(
+                "fiber",
+                0
+            )
+        ),
+        1
+    )
+
+    sodium = round(
+        float(
+            total.get(
+                "sodium",
+                0
+            )
+        )
+    )
+
+    body = [
+        {
+            "type": "text",
+            "text": f"🍱 {meal_name}",
+            "size": "xl",
+            "weight": "bold",
+            "wrap": True
+        },
+
+        {
+            "type": "text",
+            "text": f"🔥 {calories} kcal",
+            "size": "xxl",
+            "weight": "bold",
+            "margin": "md"
+        },
+
+        {
+            "type": "separator",
+            "margin": "lg"
+        },
+
+        {
+            "type": "text",
+            "text": "我抓到這些 👀",
+            "size": "sm",
+            "weight": "bold",
+            "color": "#888888",
+            "margin": "lg"
+        }
+    ]
+
+    for food in foods[:8]:
+
+        body.append(
+            food_row(food)
         )
 
-    elif confidence >= 0.80:
+    body.append({
+        "type": "separator",
+        "margin": "lg"
+    })
 
-        confidence_text = (
-            "這餐辨識得滿穩的 👌"
-        )
-
-    elif confidence >= 0.70:
-
-        confidence_text = (
-            "食物大致抓得到，"
-            "份量可能有一點誤差。"
-        )
-
-    else:
-
-        confidence_text = (
-            "這餐有幾個地方比較難估，"
-            "營養數字先當參考。"
-        )
-
-    lines.extend([
-
-        "",
-
-        f"👀 {confidence_text}"
-    ])
-
-
-    # =====================================================
-    # 真的有必要才詢問
-    # =====================================================
-
-    if vision_data.get(
-        "needs_confirmation",
-        False
-    ):
-
-        question = vision_data.get(
-            "confirmation_question"
-        )
-
-        if question:
-
-            lines.extend([
-
-                "",
-
-                "🤔 有一個地方我真的看不透：",
-
-                question
-            ])
-
-
-    # =====================================================
-    # 分析速度
-    # =====================================================
-
-    lines.extend([
-
-        "",
-
-        (
-            "⚡ 分析時間："
-            f"{elapsed_seconds:.1f} 秒"
+    body.extend([
+        nutrition_row(
+            "🥩",
+            "蛋白質",
+            f"{protein} g"
         ),
 
-        "",
+        nutrition_row(
+            "🍚",
+            "碳水",
+            f"{carbs} g"
+        ),
 
-        (
-            "⚠️ 外食照片的實際重量、"
-            "用油與醬料無法完全從照片得知，"
-            "營養數字為合理估算。"
+        nutrition_row(
+            "🥑",
+            "脂肪",
+            f"{fat} g"
+        ),
+
+        nutrition_row(
+            "🥬",
+            "纖維",
+            f"{fiber} g"
+        ),
+
+        nutrition_row(
+            "🧂",
+            "鈉",
+            f"{sodium} mg"
         )
     ])
 
-    return "\n".join(
-        lines
+    if comment:
+
+        body.extend([
+            {
+                "type": "separator",
+                "margin": "lg"
+            },
+
+            {
+                "type": "text",
+                "text": f"💬 {comment}",
+                "size": "sm",
+                "color": "#555555",
+                "wrap": True,
+                "margin": "lg"
+            }
+        ])
+
+    body.append({
+        "type": "text",
+        "text": "※ 外食份量、用油與醬料為影像估算",
+        "size": "xs",
+        "color": "#AAAAAA",
+        "wrap": True,
+        "margin": "lg"
+    })
+
+    card = {
+        "type": "bubble",
+
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "20px",
+            "contents": body
+        },
+
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "height": "sm",
+                    "action": {
+                        "type": "message",
+                        "label": "✏️ 補充 / 修正這餐",
+                        "text": "我要修正上一餐"
+                    }
+                },
+
+                {
+                    "type": "button",
+                    "style": "secondary",
+                    "height": "sm",
+                    "action": {
+                        "type": "message",
+                        "label": "📊 查看今日紀錄",
+                        "text": "查看今日紀錄"
+                    }
+                }
+            ]
+        }
+    }
+
+    return FlexMessage(
+        alt_text=f"{meal_name}｜{calories} kcal",
+        contents=FlexContainer.from_dict(card)
     )
 
 
@@ -574,75 +613,44 @@ def build_meal_message(
 )
 def handle_text(event):
 
-    user_text = (
-        event.message.text
-        or ""
-    ).strip()
+    text = event.message.text.strip()
 
-    # -----------------------------------------------------
-    # 一些基本互動
-    # -----------------------------------------------------
-
-    if user_text in [
-        "嗨",
-        "哈囉",
-        "你好",
-        "hi",
-        "Hi",
-        "HI"
-    ]:
+    if text == "我要修正上一餐":
 
         reply_text(
             event.reply_token,
-
-            "嗨屁嗨 😂\n\n"
-            "我是你的 AI 飲食小助理 🍱\n"
-            "直接把你要吃的東西拍給我。\n\n"
-            "我負責算，你負責不要偷偷漏報 😏"
+            "✏️ 好，哪裡抓錯直接糾正我。\n\n"
+            "例如：\n"
+            "「這是牛排不是豬排」\n"
+            "「白飯只有半碗」\n"
+            "「這杯是無糖豆漿」\n\n"
+            "你說，我改。這次不跟你裝傻 😂"
         )
 
         return
 
-
-    if "怎麼用" in user_text:
+    if text == "查看今日紀錄":
 
         reply_text(
             event.reply_token,
-
-            "很簡單啦 😂\n\n"
-            "📷 拍你要吃的東西\n"
-            "➡️ 照片丟給我\n"
-            "➡️ 等我認食物\n"
-            "➡️ 我幫你估熱量跟營養\n\n"
-            "就這樣，沒有要你考營養師執照。"
+            "📊 今日紀錄正在準備接上。\n"
+            "下一階段會把早餐、午餐、晚餐全部自動累計。"
         )
 
         return
-
-
-    # -----------------------------------------------------
-    # 目前非飲食問題
-    # -----------------------------------------------------
 
     reply_text(
         event.reply_token,
-
         "？？？\n"
         "我是飲食機器人欸 😂\n\n"
-        "食物、熱量、減脂、蛋白質可以問我。\n"
+        "📷 丟食物照片給我，\n"
+        "或問我熱量、蛋白質、減脂、飲食問題。\n\n"
         "其他東西先不要考我，我還在上班 🍱"
     )
 
 
 # =========================================================
 # 圖片訊息
-#
-# 收到圖片後：
-#
-# 1. 立刻回 LINE
-# 2. 背景開始分析
-# 3. AI 完成後 Push 結果
-#
 # =========================================================
 
 @handler.add(
@@ -653,275 +661,99 @@ def handle_image(event):
 
     try:
 
-        user_id = event.source.user_id
-
         message_id = event.message.id
 
-        # -------------------------------------------------
-        # 先立即告訴使用者：收到照片了
-        # -------------------------------------------------
+        # LINE 下載圖片
+        image_url = (
+            "https://api-data.line.me/"
+            f"v2/bot/message/{message_id}/content"
+        )
+
+        response = requests.get(
+            image_url,
+            headers={
+                "Authorization":
+                f"Bearer {LINE_ACCESS_TOKEN}"
+            },
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+        image_bytes = response.content
+
+        content_type = response.headers.get(
+            "Content-Type",
+            "image/jpeg"
+        )
+
+        # Base64
+        image_base64 = base64.b64encode(
+            image_bytes
+        ).decode("utf-8")
+
+        data_url = (
+            f"data:{content_type};base64,"
+            f"{image_base64}"
+        )
+
+        # AI 分析
+        ai_response = client.responses.create(
+
+            model="gpt-5.4-mini",
+
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": FOOD_PROMPT
+                        },
+
+                        {
+                            "type": "input_image",
+                            "image_url": data_url,
+                            "detail": "high"
+                        }
+                    ]
+                }
+            ]
+        )
+
+        result_text = ai_response.output_text
+
+        print(
+            "AI_RAW_RESULT:",
+            result_text
+        )
+
+        data = parse_ai_json(
+            result_text
+        )
+
+        flex = build_food_card(
+            data
+        )
+
+        reply_messages(
+            event.reply_token,
+            [flex]
+        )
+
+    except Exception as e:
+
+        print(
+            "IMAGE_ANALYSIS_ERROR:",
+            repr(e)
+        )
 
         reply_text(
             event.reply_token,
-
-            "📸 收到！這餐交給我。\n"
-            "我正在認食物 → 拆料理 → 算營養 🧠\n\n"
-            "不用顧著我，你可以繼續傳 😂"
+            "🥲 這餐分析到一半翻車了。\n"
+            "再傳一次給我。\n\n"
+            "如果我又翻車，我們就去 Render 抓兇手 😂"
         )
-
-        # -------------------------------------------------
-        # AI 放到背景執行
-        # -------------------------------------------------
-
-        thread = threading.Thread(
-            target=analyze_food_image,
-            args=(
-                user_id,
-                message_id
-            ),
-            daemon=True
-        )
-
-        thread.start()
-
-    except Exception as e:
-
-        print(
-            "IMAGE_HANDLER_ERROR:",
-            repr(e)
-        )
-
-        try:
-
-            reply_text(
-                event.reply_token,
-
-                "🥲 欸，照片我是收到了，"
-                "但剛剛啟動分析時卡了一下。\n\n"
-                "再傳一次給我。"
-            )
-
-        except Exception:
-
-            pass
-
-
-# =========================================================
-# 背景 AI 分析
-# =========================================================
-
-def analyze_food_image(
-    user_id,
-    message_id
-):
-
-    start_time = time.time()
-
-    try:
-
-        # =================================================
-        # STEP 1
-        # 下載 LINE 圖片
-        # =================================================
-
-        download_start = time.time()
-
-        image_bytes, content_type = (
-            download_line_image(
-                message_id
-            )
-        )
-
-        download_time = (
-            time.time()
-            - download_start
-        )
-
-        print(
-            "IMAGE_DOWNLOADED:",
-            len(image_bytes),
-            content_type
-        )
-
-        print(
-            "DOWNLOAD_TIME:",
-            f"{download_time:.2f}s"
-        )
-
-
-        # =================================================
-        # STEP 2
-        # 第一層 AI：辨識「眼前是什麼」
-        # =================================================
-
-        vision_start = time.time()
-
-        vision_data = recognize_foods(
-            image_bytes,
-            content_type
-        )
-
-        vision_time = (
-            time.time()
-            - vision_start
-        )
-
-        print(
-            "VISION_RESULT:",
-            vision_data
-        )
-
-        print(
-            "VISION_TIME:",
-            f"{vision_time:.2f}s"
-        )
-
-
-        # =================================================
-        # STEP 3
-        # 第二層 AI：理解料理
-        # =================================================
-
-        recipe_start = time.time()
-
-        recipe_data = understand_recipes(
-            vision_data
-        )
-
-        recipe_time = (
-            time.time()
-            - recipe_start
-        )
-
-        print(
-            "RECIPE_RESULT:",
-            recipe_data
-        )
-
-        print(
-            "RECIPE_TIME:",
-            f"{recipe_time:.2f}s"
-        )
-
-
-        # =================================================
-        # STEP 4
-        # 第三層 AI：營養估算
-        # =================================================
-
-        nutrition_start = time.time()
-
-        nutrition_data = estimate_nutrition(
-            vision_data,
-            recipe_data
-        )
-
-        nutrition_time = (
-            time.time()
-            - nutrition_start
-        )
-
-        print(
-            "NUTRITION_RESULT:",
-            nutrition_data
-        )
-
-        print(
-            "NUTRITION_TIME:",
-            f"{nutrition_time:.2f}s"
-        )
-
-
-        # =================================================
-        # STEP 5
-        # 計算總耗時
-        # =================================================
-
-        elapsed_seconds = (
-            time.time()
-            - start_time
-        )
-
-        print(
-            "================================="
-        )
-
-        print(
-            "DOWNLOAD_TIME:",
-            f"{download_time:.2f}s"
-        )
-
-        print(
-            "VISION_TIME:",
-            f"{vision_time:.2f}s"
-        )
-
-        print(
-            "RECIPE_TIME:",
-            f"{recipe_time:.2f}s"
-        )
-
-        print(
-            "NUTRITION_TIME:",
-            f"{nutrition_time:.2f}s"
-        )
-
-        print(
-            "TOTAL_ANALYSIS_TIME:",
-            f"{elapsed_seconds:.2f}s"
-        )
-
-        print(
-            "================================="
-        )
-
-
-        # =================================================
-        # STEP 6
-        # 建立 LINE 訊息
-        # =================================================
-
-        result = build_meal_message(
-            vision_data,
-            nutrition_data,
-            elapsed_seconds
-        )
-
-
-        # =================================================
-        # STEP 7
-        # AI 完成後主動推送
-        # =================================================
-
-        push_text(
-            user_id,
-            result
-        )
-
-
-    except Exception as e:
-
-        print(
-            "FOOD_AI_BACKGROUND_ERROR:",
-            repr(e)
-        )
-
-        try:
-
-            push_text(
-                user_id,
-
-                "🥲 欸，我這餐算到一半腦袋打結了。\n"
-                "照片有收到，但分析沒有成功。\n\n"
-                "再丟一次給我，我們抓兇手 😂"
-            )
-
-        except Exception as push_error:
-
-            print(
-                "PUSH_ERROR:",
-                repr(push_error)
-            )
 
 
 # =========================================================
