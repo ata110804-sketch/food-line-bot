@@ -700,7 +700,7 @@ INTENT_SCHEMA = {
                 "carbs_target": {"type": ["number", "null"]},
                 "fat_target": {"type": ["number", "null"]},
                 "fiber_target": {"type": ["number", "null"]},
-                "scope": {"type": ["string", "null"], "enum": ["today", "permanent", null]},
+                "scope": {"type": ["string", "null"], "enum": ["today", "permanent",     None]},
                 "mode_name": {"type": ["string", "null"]}
             },
             "required": [
