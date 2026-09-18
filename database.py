@@ -320,10 +320,51 @@ def init_database():
                 """
             )
 
+        # =================================================
+        # V5.4：運動紀錄＋對話上下文
+        # =================================================
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS exercise_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    log_date DATE NOT NULL,
+                    exercise_type TEXT NOT NULL,
+                    duration_minutes DOUBLE PRECISION,
+                    calories_burned DOUBLE PRECISION,
+                    intensity TEXT,
+                    note TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_exercise_logs_user_date
+                ON exercise_logs(user_id, log_date);
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_state (
+                    user_id TEXT PRIMARY KEY,
+                    context_type TEXT,
+                    target_date DATE,
+                    meal_type TEXT,
+                    last_entity TEXT,
+                    state JSONB DEFAULT '{}'::jsonb,
+                    expires_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """
+            )
+
         conn.commit()
 
         print(
-            "DATABASE_V5_2_READY",
+            "DATABASE_V5_4_READY",
             flush=True
         )
 
@@ -2812,3 +2853,234 @@ def get_yesterday_snapshot(user_id):
         "targets": get_effective_targets(user_id, yesterday) or {},
         "water": get_water_total(user_id, yesterday),
     }
+
+# =========================================================
+# V5.4：指定日期便利函式
+# =========================================================
+
+def get_day_snapshot(user_id, target_date=None):
+    target_date = normalize_date(target_date)
+    return {
+        "date": target_date,
+        "meals": get_meals_by_date(user_id, target_date),
+        "totals": get_totals_by_date(user_id, target_date),
+        "water": get_water_total(user_id, target_date),
+        "weight": get_weight_by_date(user_id, target_date),
+        "exercise": get_exercise_by_date(user_id, target_date),
+    }
+
+
+def get_weight_by_date(user_id, target_date=None):
+    target_date = normalize_date(target_date)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT * FROM weight_logs
+                WHERE user_id = %s AND log_date = %s
+                LIMIT 1;
+                """,
+                (user_id, target_date),
+            )
+            return cursor.fetchone()
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V5.4：運動紀錄
+# =========================================================
+
+def save_exercise(
+    user_id,
+    exercise_type,
+    duration_minutes=None,
+    calories_burned=None,
+    intensity=None,
+    note=None,
+    log_date=None,
+):
+    target_date = normalize_date(log_date)
+    exercise_type = str(exercise_type or "").strip()
+    if not exercise_type:
+        raise ValueError("運動類型不能是空白。")
+
+    if duration_minutes is not None:
+        duration_minutes = float(duration_minutes)
+        if duration_minutes <= 0 or duration_minutes > 1440:
+            raise ValueError("運動時間請輸入 1～1440 分鐘。")
+
+    if calories_burned is not None:
+        calories_burned = float(calories_burned)
+        if calories_burned < 0 or calories_burned > 10000:
+            raise ValueError("運動消耗熱量數值不合理。")
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO exercise_logs (
+                    user_id, log_date, exercise_type, duration_minutes,
+                    calories_burned, intensity, note
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING *;
+                """,
+                (
+                    user_id, target_date, exercise_type, duration_minutes,
+                    calories_burned, intensity, note,
+                ),
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+def get_exercise_by_date(user_id, target_date=None):
+    target_date = normalize_date(target_date)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT * FROM exercise_logs
+                WHERE user_id = %s AND log_date = %s
+                ORDER BY created_at ASC, id ASC;
+                """,
+                (user_id, target_date),
+            )
+            return cursor.fetchall()
+    finally:
+        conn.close()
+
+
+def get_exercise_totals(user_id, target_date=None):
+    target_date = normalize_date(target_date)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) AS exercise_count,
+                    COALESCE(SUM(duration_minutes), 0) AS duration_minutes,
+                    COALESCE(SUM(calories_burned), 0) AS calories_burned
+                FROM exercise_logs
+                WHERE user_id = %s AND log_date = %s;
+                """,
+                (user_id, target_date),
+            )
+            return cursor.fetchone()
+    finally:
+        conn.close()
+
+
+def delete_last_exercise(user_id, target_date=None):
+    target_date = normalize_date(target_date)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM exercise_logs
+                WHERE id = (
+                    SELECT id FROM exercise_logs
+                    WHERE user_id = %s AND log_date = %s
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                )
+                RETURNING *;
+                """,
+                (user_id, target_date),
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+# =========================================================
+# V5.4：短期對話上下文
+# =========================================================
+
+def set_conversation_state(
+    user_id,
+    context_type=None,
+    target_date=None,
+    meal_type=None,
+    last_entity=None,
+    state=None,
+    ttl_minutes=30,
+):
+    resolved_date = normalize_date(target_date) if target_date is not None else None
+    expires_at = taiwan_now() + timedelta(minutes=max(1, int(ttl_minutes)))
+    payload = state or {}
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO conversation_state (
+                    user_id, context_type, target_date, meal_type,
+                    last_entity, state, expires_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, NOW())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    context_type = EXCLUDED.context_type,
+                    target_date = EXCLUDED.target_date,
+                    meal_type = EXCLUDED.meal_type,
+                    last_entity = EXCLUDED.last_entity,
+                    state = EXCLUDED.state,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = NOW()
+                RETURNING *;
+                """,
+                (
+                    user_id, context_type, resolved_date, meal_type, last_entity,
+                    json.dumps(payload, ensure_ascii=False), expires_at,
+                ),
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+def get_conversation_state(user_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT * FROM conversation_state
+                WHERE user_id = %s
+                  AND (expires_at IS NULL OR expires_at > NOW())
+                LIMIT 1;
+                """,
+                (user_id,),
+            )
+            return cursor.fetchone()
+    finally:
+        conn.close()
+
+
+def clear_conversation_state(user_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM conversation_state WHERE user_id = %s RETURNING user_id;",
+                (user_id,),
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        return bool(result)
+    finally:
+        conn.close()
