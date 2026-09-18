@@ -126,7 +126,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V5.6 is running!"
+    return "LINE Food AI Bot V5.7 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -1614,10 +1614,93 @@ def handle_exercise_text_v56(event,user_id,text):
         if row: reply_text(event.reply_token,_finish_plan(user_id,row['id'],1.0)); return True
     return False
 
+
+
+# =========================================================
+# V5.7：常用運動模板 + 飲食 ABC 中心
+# =========================================================
+WORKOUT_TEMPLATES = {
+    "UPPER": {"title":"上半身日","subtitle":"胸・背・肩・手臂","minutes":45,"met":5.0,"muscles":"胸・背・肩・二頭・三頭","items":[
+        ("胸推／啞鈴臥推","3組 × 8–12下","胸・三頭"),("坐姿划船","3組 × 8–12下","背・二頭"),("肩推","3組 × 8–12下","肩・三頭"),("滑輪下拉","3組 × 8–12下","背・二頭"),("二頭彎舉","2組 × 10–15下","二頭"),("三頭下壓","2組 × 10–15下","三頭")]},
+    "LOWER": {"title":"下半身日","subtitle":"臀・腿前・腿後","minutes":50,"met":5.5,"muscles":"臀部・大腿前側・腿後側","items":[
+        ("深蹲／史密斯深蹲","4組 × 6–10下","臀・腿前・核心"),("羅馬尼亞硬舉","3組 × 8–12下","臀・腿後"),("腿推","3組 × 10–12下","臀腿"),("腿屈伸","3組 × 10–15下","腿前"),("腿後勾","3組 × 10–15下","腿後")]},
+    "PUSH": {"title":"推日 Push","subtitle":"胸・肩・三頭","minutes":45,"met":5.0,"muscles":"胸・肩・三頭","items":[
+        ("胸推／臥推","4組 × 6–10下","胸・三頭"),("肩推","3組 × 8–12下","肩・三頭"),("上斜胸推","3組 × 8–12下","上胸"),("側平舉","3組 × 12–15下","中束三角肌"),("三頭下壓","3組 × 10–15下","三頭")]},
+    "PULL": {"title":"拉日 Pull","subtitle":"背・後肩・二頭","minutes":45,"met":5.0,"muscles":"背部・後肩・二頭","items":[
+        ("滑輪下拉","4組 × 8–12下","背闊肌・二頭"),("坐姿划船","3組 × 8–12下","中背・二頭"),("單臂划船","3組 × 10下／邊","背闊肌"),("面拉 Face Pull","3組 × 12–15下","後肩・上背"),("二頭彎舉","3組 × 10–15下","二頭")]},
+    "FULL": {"title":"全身日","subtitle":"時間少就練這套","minutes":40,"met":5.0,"muscles":"臀腿・胸・背・核心","items":[
+        ("腿推／深蹲","3組 × 8–12下","臀腿"),("胸推","3組 × 8–12下","胸・三頭"),("坐姿划船","3組 × 8–12下","背・二頭"),("臀橋／臀推","3組 × 10–12下","臀部"),("核心抗旋轉","2組 × 10下／邊","核心")]},
+    "LOW": {"title":"低衝擊日","subtitle":"不跳、不跑、溫和完成","minutes":25,"met":3.0,"muscles":"核心・臀部・上半身","items":[
+        ("死蟲 Dead Bug","2組 × 8下／邊","核心"),("臀橋","3組 × 12下","臀部"),("坐姿划船","3組 × 12下","背部"),("坐姿肩推","2組 × 10下","肩部"),("舒適範圍活動","5分鐘","放鬆")]} }
+
+DIET_MODES = {
+ "CUT": {"title":"一般減脂日","note":"穩穩吃，不用餓。蛋白質先顧好。","choices":[
+   ("A｜超商快狠準","雞胸 1 份＋茶葉蛋 2 顆＋地瓜 1 條＋生菜","約 500 kcal","蛋白質 45g｜碳水 48g｜脂肪 14g","糖 約 9g｜鈉 約 850mg"),
+   ("B｜便當穩定版","烤雞腿便當：飯半碗＋青菜 2 格＋蛋／豆腐","約 560 kcal","蛋白質 38g｜碳水 55g｜脂肪 20g","糖 約 8g｜鈉 約 950mg"),
+   ("C｜火鍋舒服版","瘦肉 1 份＋豆腐＋大量青菜＋冬粉半份","約 520 kcal","蛋白質 40g｜碳水 42g｜脂肪 18g","糖 約 10g｜鈉 約 1100mg")]},
+ "HIGH": {"title":"高蛋白日","note":"今天蛋白質落後，就從這裡補。","choices":[
+   ("A｜雞胸組","雞胸 150g＋蛋 2 顆＋飯半碗＋青菜","約 520 kcal","蛋白質 55g｜碳水 42g｜脂肪 16g","糖 約 5g｜鈉 約 750mg"),
+   ("B｜魚肉組","鮭魚 120g＋豆腐＋飯半碗＋青菜","約 560 kcal","蛋白質 43g｜碳水 40g｜脂肪 24g","糖 約 5g｜鈉 約 700mg"),
+   ("C｜懶人組","無糖高蛋白飲＋茶葉蛋 2 顆＋雞肉沙拉＋香蕉","約 480 kcal","蛋白質 45g｜碳水 45g｜脂肪 14g","糖 約 18g｜鈉 約 800mg")]},
+ "LOWCARB": {"title":"低碳日","note":"低碳不是零碳；蔬菜和蛋白質照吃。","choices":[
+   ("A｜雞肉低碳","雞腿排／雞胸＋蛋＋青菜 2–3 份＋豆腐","約 450 kcal","蛋白質 48g｜碳水 18g｜脂肪 21g","糖 約 7g｜鈉 約 800mg"),
+   ("B｜火鍋低碳","肉片＋蛋＋豆腐＋菇菜，不加麵飯","約 500 kcal","蛋白質 45g｜碳水 22g｜脂肪 25g","糖 約 9g｜鈉 約 1200mg"),
+   ("C｜超商低碳","雞胸＋茶葉蛋 2 顆＋無糖豆漿＋沙拉","約 430 kcal","蛋白質 50g｜碳水 20g｜脂肪 17g","糖 約 8g｜鈉 約 900mg")]},
+ "FREE": {"title":"放縱日／彈性餐","note":"可以爽，但不是從容地走進去、狼狽地扶牆出來 😂","choices":[
+   ("A｜漢堡想吃就吃","單層漢堡＋無糖飲；薯條小份或不點","約 550–700 kcal","蛋白質 25–35g｜碳水 55–75g｜脂肪 22–30g","糖 約 8–18g｜鈉 約 1000–1500mg"),
+   ("B｜麵飯派","喜歡的主食正常 1 份＋蛋白質 1 份＋青菜","約 650–800 kcal","蛋白質 30–40g｜碳水 75–100g｜脂肪 20–30g","糖依餐點｜鈉約 1000–1600mg"),
+   ("C｜甜點派","正餐先吃蛋白質＋蔬菜，再留 1 份甜點","約 650–850 kcal","蛋白質 30–40g｜碳水 70–100g｜脂肪 25–35g","糖 約 25–45g｜鈉依餐點")]} }
+
+def workout_template_menu_flex(user_id):
+    cards=[]
+    for code,p in WORKOUT_TEMPLATES.items():
+        lo,hi=_cal_range(user_id,p['minutes'],p['met'])
+        cards.append({"type":"bubble","size":"kilo","body":{"type":"box","layout":"vertical","spacing":"md","contents":[
+          {"type":"text","text":f"🏋️ {p['title']}","weight":"bold","size":"xl","wrap":True},
+          {"type":"text","text":p['subtitle'],"size":"sm","color":"#666666","wrap":True},
+          {"type":"text","text":f"⏱ {p['minutes']} 分鐘　🔥 約 {lo}–{hi} kcal","size":"sm","wrap":True},
+          {"type":"text","text":f"🎯 {p['muscles']}","size":"sm","wrap":True}]},
+          "footer":{"type":"box","layout":"vertical","contents":[_postback_button("直接看菜單",f"tpl:show:{code}","primary")]}})
+    return FlexMessage(alt_text="🏋️ 我的常用運動模板",contents=FlexContainer.from_dict({"type":"carousel","contents":cards}))
+
+def workout_template_detail_flex(user_id,code):
+    p=WORKOUT_TEMPLATES.get(code,WORKOUT_TEMPLATES['FULL']); lo,hi=_cal_range(user_id,p['minutes'],p['met'])
+    row=save_exercise_plan(user_id,f"TPL_{code}",p['title'],p['minutes'],lo,hi,p['muscles'],[{"name":a,"sets":b,"muscles":c} for a,b,c in p['items']])
+    body=[{"type":"text","text":f"🏋️ {p['title']}","weight":"bold","size":"xl"},
+          {"type":"text","text":f"⏱ {p['minutes']} 分　🔥 約 {lo}–{hi} kcal","size":"sm","color":"#555555"},
+          {"type":"text","text":f"🎯 {p['muscles']}","size":"sm","wrap":True},{"type":"separator","margin":"md"}]
+    for i,(name,sets,muscles) in enumerate(p['items'],1):
+        body += [{"type":"text","text":f"{i}  {name}","weight":"bold","margin":"md","wrap":True},{"type":"text","text":f"{sets}｜{muscles}","size":"sm","color":"#666666","wrap":True}]
+    footer=[_postback_button("▶️ 開始這套",f"ex:start:{row['id']}","primary"),_postback_button("✅ 完成訓練",f"ex:done:{row['id']}","primary"),_postback_button("🌓 做一部分",f"ex:partial:{row['id']}"),_postback_button("↩️ 其他模板","tpl:menu")]
+    return FlexMessage(alt_text=f"🏋️ {p['title']}",contents=FlexContainer.from_dict({"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},"footer":{"type":"box","layout":"vertical","spacing":"sm","contents":footer}}))
+
+def diet_mode_menu_flex():
+    cards=[]
+    for code,p in DIET_MODES.items():
+        cards.append({"type":"bubble","size":"kilo","body":{"type":"box","layout":"vertical","spacing":"md","contents":[
+          {"type":"text","text":f"🍱 {p['title']}","weight":"bold","size":"xl","wrap":True},{"type":"text","text":p['note'],"size":"sm","color":"#666666","wrap":True},
+          {"type":"text","text":"點進去看 A／B／C 三種吃法","size":"sm","wrap":True}]},"footer":{"type":"box","layout":"vertical","contents":[_postback_button("看 ABC",f"diet:mode:{code}","primary")]}})
+    return FlexMessage(alt_text="🍱 飲食 ABC",contents=FlexContainer.from_dict({"type":"carousel","contents":cards}))
+
+def diet_choices_flex(code):
+    p=DIET_MODES.get(code,DIET_MODES['CUT']); cards=[]
+    for title,foods,kcal,macro,extra in p['choices']:
+        cards.append({"type":"bubble","size":"kilo","body":{"type":"box","layout":"vertical","spacing":"md","contents":[
+          {"type":"text","text":title,"weight":"bold","size":"xl","wrap":True},{"type":"text","text":foods,"size":"md","wrap":True},
+          {"type":"separator","margin":"md"},{"type":"text","text":f"🔥 {kcal}","weight":"bold","margin":"md"},{"type":"text","text":f"🥩 {macro}","size":"sm","wrap":True},{"type":"text","text":f"🧂 {extra}","size":"sm","color":"#666666","wrap":True}]},
+          "footer":{"type":"box","layout":"vertical","contents":[_postback_button("↩️ 換飲食模式","diet:menu")]}})
+    return FlexMessage(alt_text=f"🍱 {p['title']} A/B/C",contents=FlexContainer.from_dict({"type":"carousel","contents":cards}))
+
 @handler.add(PostbackEvent)
 def handle_postback_v56(event):
     user_id=get_user_id(event); data=getattr(event.postback,'data','') or ''
     try:
+        if data=='tpl:menu': reply_messages(event.reply_token,[workout_template_menu_flex(user_id)]); return
+        m=re.match(r'tpl:show:(UPPER|LOWER|PUSH|PULL|FULL|LOW)$',data)
+        if m: reply_messages(event.reply_token,[workout_template_detail_flex(user_id,m.group(1))]); return
+        if data=='diet:menu': reply_messages(event.reply_token,[diet_mode_menu_flex()]); return
+        m=re.match(r'diet:mode:(CUT|HIGH|LOWCARB|FREE)$',data)
+        if m: reply_messages(event.reply_token,[diet_choices_flex(m.group(1))]); return
         if data=='ex:choices': reply_messages(event.reply_token,[exercise_choice_flex(user_id)]); return
         m=re.match(r'ex:show:([A-D])$',data)
         if m: reply_messages(event.reply_token,[exercise_plan_flex(user_id,m.group(1))]); return
@@ -1683,6 +1766,22 @@ def handle_text(event):
         # V5.3 LINE Rich Menu 六大入口
         # 必須放在一般聊天 / AI 判斷之前，避免選單文字被誤判。
         # -------------------------------------------------
+
+        if text in ["我的模板","常用模板","運動模板","我的常用模板"]:
+            reply_messages(event.reply_token,[workout_template_menu_flex(user_id)])
+            return
+
+        if text in ["飲食ABC","飲食 ABC","菜單ABC","菜單 ABC","飲食選擇"]:
+            reply_messages(event.reply_token,[diet_mode_menu_flex()])
+            return
+
+        if text in ["低碳日","低碳菜單"]:
+            reply_messages(event.reply_token,[diet_choices_flex("LOWCARB")])
+            return
+
+        if text in ["放縱日","放縱餐","彈性餐"]:
+            reply_messages(event.reply_token,[diet_choices_flex("FREE")])
+            return
 
         if text == "記錄飲食":
             reply_text(event.reply_token, rich_menu_food_entry_reply())
