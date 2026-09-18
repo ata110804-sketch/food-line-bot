@@ -65,15 +65,13 @@ handler = WebhookHandler(
 
 
 # =========================================================
-# 啟動資料庫
+# 初始化資料庫
 # =========================================================
 
 try:
-
     init_database()
 
 except Exception as e:
-
     print(
         "DATABASE_INIT_ERROR:",
         repr(e),
@@ -82,12 +80,11 @@ except Exception as e:
 
 
 # =========================================================
-# 網站
+# Web
 # =========================================================
 
 @app.route("/", methods=["GET"])
 def home():
-
     return "LINE Food AI Bot V2 is running!"
 
 
@@ -104,14 +101,12 @@ def callback():
     )
 
     try:
-
         handler.handle(
             body,
             signature
         )
 
     except InvalidSignatureError:
-
         abort(400)
 
     return "OK"
@@ -126,9 +121,7 @@ def reply_messages(
     messages
 ):
 
-    with ApiClient(
-        configuration
-    ) as api_client:
+    with ApiClient(configuration) as api_client:
 
         line_bot_api = MessagingApi(
             api_client
@@ -158,7 +151,7 @@ def reply_text(
 
 
 # =========================================================
-# 使用者 ID
+# User ID
 # =========================================================
 
 def get_user_id(event):
@@ -174,7 +167,7 @@ def get_user_id(event):
 
 
 # =========================================================
-# 數字處理
+# 數字安全轉換
 # =========================================================
 
 def number(
@@ -183,94 +176,67 @@ def number(
 ):
 
     try:
-
         return float(
             value or 0
         )
 
     except Exception:
-
         return default
 
 
-def totals_to_dict(
-    totals
-):
+def totals_to_dict(totals):
 
     totals = totals or {}
 
     return {
+        "calories": number(
+            totals.get("calories", 0)
+        ),
 
-        "calories":
-            number(
-                totals.get(
-                    "calories",
-                    0
-                )
-            ),
+        "protein": number(
+            totals.get("protein", 0)
+        ),
 
-        "protein":
-            number(
-                totals.get(
-                    "protein",
-                    0
-                )
-            ),
+        "carbs": number(
+            totals.get("carbs", 0)
+        ),
 
-        "carbs":
-            number(
-                totals.get(
-                    "carbs",
-                    0
-                )
-            ),
+        "fat": number(
+            totals.get("fat", 0)
+        ),
 
-        "fat":
-            number(
-                totals.get(
-                    "fat",
-                    0
-                )
-            ),
+        "fiber": number(
+            totals.get("fiber", 0)
+        ),
 
-        "fiber":
-            number(
-                totals.get(
-                    "fiber",
-                    0
-                )
-            ),
+        "sodium": number(
+            totals.get("sodium", 0)
+        ),
 
-        "sodium":
-            number(
-                totals.get(
-                    "sodium",
-                    0
-                )
-            ),
-
-        "meal_count":
-            int(
-                totals.get(
-                    "meal_count",
-                    0
-                )
-                or 0
-            )
+        "meal_count": int(
+            totals.get("meal_count", 0)
+            or 0
+        ),
     }
 
 
 # =========================================================
-# BMR / TDEE / 每日營養目標
+# 個人營養目標
 # =========================================================
 
-def calculate_targets(
-    profile
-):
+def calculate_targets(profile):
 
-    weight = profile["weight_kg"]
-    height = profile["height_cm"]
-    age = profile["age"]
+    weight = float(
+        profile["weight_kg"]
+    )
+
+    height = float(
+        profile["height_cm"]
+    )
+
+    age = int(
+        profile["age"]
+    )
 
     sex = str(
         profile["sex"]
@@ -281,7 +247,7 @@ def calculate_targets(
         "男",
         "男性",
         "male",
-        "m"
+        "m",
     ]:
 
         bmr = (
@@ -290,6 +256,8 @@ def calculate_targets(
             - 5 * age
             + 5
         )
+
+        is_male = True
 
     else:
 
@@ -300,17 +268,14 @@ def calculate_targets(
             - 161
         )
 
+        is_male = False
+
     activity_factors = {
-
         "久坐": 1.2,
-
         "輕量": 1.375,
-
         "中等": 1.55,
-
         "高": 1.725,
-
-        "非常高": 1.9
+        "非常高": 1.9,
     }
 
     activity_factor = (
@@ -328,66 +293,50 @@ def calculate_targets(
     goal = profile["goal"]
 
     if goal == "減脂":
-
         calorie_target = (
-            tdee
-            - 350
+            tdee - 350
         )
 
     elif goal == "增肌":
-
         calorie_target = (
-            tdee
-            + 250
+            tdee + 250
         )
 
     else:
-
         calorie_target = tdee
 
-    # 避免系統自動產生過低的熱量目標
-    if sex in [
-        "男",
-        "男性",
-        "male",
-        "m"
-    ]:
+    # 防止自動目標過低
+    calorie_floor = (
+        1500
+        if is_male
+        else 1200
+    )
 
-        calorie_target = max(
-            calorie_target,
-            1500
-        )
-
-    else:
-
-        calorie_target = max(
-            calorie_target,
-            1200
-        )
+    calorie_target = max(
+        calorie_target,
+        calorie_floor
+    )
 
     if goal in [
         "減脂",
-        "增肌"
+        "增肌",
     ]:
 
         protein_target = (
-            weight
-            * 1.6
+            weight * 1.6
         )
 
     else:
 
         protein_target = (
-            weight
-            * 1.4
+            weight * 1.4
         )
 
     fat_target = (
-        weight
-        * 0.8
+        weight * 0.8
     )
 
-    remaining_calories = (
+    calories_left_for_carbs = (
         calorie_target
         - protein_target * 4
         - fat_target * 9
@@ -395,38 +344,27 @@ def calculate_targets(
 
     carbs_target = max(
         0,
-        remaining_calories / 4
+        calories_left_for_carbs / 4
     )
 
     return {
-
         **profile,
 
-        "bmr":
-            round(bmr),
+        "bmr": round(bmr),
 
-        "tdee":
-            round(tdee),
+        "tdee": round(tdee),
 
         "calorie_target":
-            round(
-                calorie_target
-            ),
+            round(calorie_target),
 
         "protein_target":
-            round(
-                protein_target
-            ),
+            round(protein_target),
 
         "carbs_target":
-            round(
-                carbs_target
-            ),
+            round(carbs_target),
 
         "fat_target":
-            round(
-                fat_target
-            ),
+            round(fat_target),
 
         "fiber_target": 25,
 
@@ -434,31 +372,42 @@ def calculate_targets(
             profile.get(
                 "inbody",
                 {}
-            )
+            ),
     }
 
 
 # =========================================================
-# 今日進度文字
+# 目標進度文字
 # =========================================================
 
-def target_line(
+def progress_line(
     emoji,
     used,
     target,
     unit
 ):
 
-    remaining = max(
-        0,
+    used = number(used)
+    target = number(target)
+
+    remaining = (
         target - used
     )
+
+    if remaining >= 0:
+
+        return (
+            f"{emoji} "
+            f"{round(used, 1)} / "
+            f"{round(target, 1)} {unit}"
+            f"｜剩 {round(remaining, 1)}"
+        )
 
     return (
         f"{emoji} "
         f"{round(used, 1)} / "
         f"{round(target, 1)} {unit}"
-        f"｜剩 {round(remaining, 1)}"
+        f"｜超 {round(abs(remaining), 1)}"
     )
 
 
@@ -477,35 +426,39 @@ def make_meal_card(
         today_totals
     )
 
-    total = data.get(
-        "total",
-        {}
+    total = (
+        data.get("total")
+        or {}
     )
 
-    foods = data.get(
-        "foods",
-        []
+    foods = (
+        data.get("foods")
+        or []
     )
 
-    meal_name = data.get(
-        "meal_name",
-        "這一餐"
+    meal_name = (
+        data.get("meal_name")
+        or "這一餐"
     )
 
-    title = (
-        "✏️ 已修正｜"
-        if corrected
-        else "🍱 "
-    ) + meal_name
+    if corrected:
+        title = (
+            "✏️ 已更新｜"
+            + meal_name
+        )
+    else:
+        title = (
+            "🍱 "
+            + meal_name
+        )
 
     body = [
-
         {
             "type": "text",
             "text": title,
             "weight": "bold",
             "size": "xl",
-            "wrap": True
+            "wrap": True,
         },
 
         {
@@ -517,48 +470,78 @@ def make_meal_card(
             ),
             "weight": "bold",
             "size": "xxl",
-            "margin": "md"
+            "margin": "md",
+        },
+
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "margin": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": (
+                        "🥩 "
+                        f"{round(number(total.get('protein')), 1)}g"
+                    ),
+                    "size": "sm",
+                    "flex": 1,
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "🍚 "
+                        f"{round(number(total.get('carbs')), 1)}g"
+                    ),
+                    "size": "sm",
+                    "flex": 1,
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "🥑 "
+                        f"{round(number(total.get('fat')), 1)}g"
+                    ),
+                    "size": "sm",
+                    "flex": 1,
+                },
+            ],
         },
 
         {
             "type": "separator",
-            "margin": "lg"
-        }
+            "margin": "lg",
+        },
     ]
 
     # -----------------------------------------------------
-    # 食物清單
+    # 食物項目
     # -----------------------------------------------------
 
     for food in foods[:8]:
 
-        food_name = food.get(
-            "name",
-            "食物"
+        food_name = (
+            food.get("name")
+            or "食物"
         )
 
-        quantity = food.get(
-            "quantity",
-            ""
+        quantity = (
+            food.get("quantity")
+            or ""
         )
 
         calories = round(
             number(
-                food.get(
-                    "calories"
-                )
+                food.get("calories")
             )
         )
 
         body.append(
-
             {
                 "type": "box",
                 "layout": "horizontal",
                 "margin": "sm",
-
                 "contents": [
-
                     {
                         "type": "text",
                         "text": (
@@ -567,7 +550,7 @@ def make_meal_card(
                         ),
                         "size": "sm",
                         "wrap": True,
-                        "flex": 7
+                        "flex": 7,
                     },
 
                     {
@@ -577,31 +560,34 @@ def make_meal_card(
                         ),
                         "size": "sm",
                         "align": "end",
-                        "flex": 3
-                    }
-                ]
+                        "flex": 3,
+                    },
+                ],
             }
         )
 
+    # -----------------------------------------------------
+    # 今日累計
+    # -----------------------------------------------------
+
     body.extend(
         [
-
             {
                 "type": "separator",
-                "margin": "lg"
+                "margin": "lg",
             },
 
             {
                 "type": "text",
-                "text": "📊 今日進度",
+                "text": "📊 今日累計",
                 "weight": "bold",
-                "margin": "lg"
-            }
+                "margin": "lg",
+            },
         ]
     )
 
     # -----------------------------------------------------
-    # 有設定個人目標
+    # 有個人資料
     # -----------------------------------------------------
 
     if profile:
@@ -630,106 +616,163 @@ def make_meal_card(
             )
         )
 
-        remaining_calories = max(
-            0,
+        fiber_target = number(
+            profile.get(
+                "fiber_target"
+            ),
+            25
+        )
+
+        remaining_calories = (
             calorie_target
             - today["calories"]
         )
 
         body.extend(
             [
-
                 {
                     "type": "text",
-                    "text": target_line(
+                    "text": progress_line(
                         "🔥",
                         today["calories"],
                         calorie_target,
-                        "kcal"
+                        "kcal",
                     ),
                     "size": "sm",
-                    "margin": "sm"
+                    "margin": "sm",
+                    "wrap": True,
                 },
 
                 {
                     "type": "text",
-                    "text": target_line(
+                    "text": progress_line(
                         "🥩",
                         today["protein"],
                         protein_target,
-                        "g"
+                        "g",
                     ),
                     "size": "sm",
-                    "margin": "sm"
+                    "margin": "sm",
+                    "wrap": True,
                 },
 
                 {
                     "type": "text",
-                    "text": target_line(
+                    "text": progress_line(
                         "🍚",
                         today["carbs"],
                         carbs_target,
-                        "g"
+                        "g",
                     ),
                     "size": "sm",
-                    "margin": "sm"
+                    "margin": "sm",
+                    "wrap": True,
                 },
 
                 {
                     "type": "text",
-                    "text": target_line(
+                    "text": progress_line(
                         "🥑",
                         today["fat"],
                         fat_target,
-                        "g"
+                        "g",
                     ),
                     "size": "sm",
-                    "margin": "sm"
+                    "margin": "sm",
+                    "wrap": True,
                 },
 
                 {
                     "type": "text",
-                    "text": (
-                        "今天還可以吃約 "
-                        f"{round(remaining_calories)} kcal"
+                    "text": progress_line(
+                        "🥬",
+                        today["fiber"],
+                        fiber_target,
+                        "g",
                     ),
-                    "weight": "bold",
-                    "margin": "md",
-                    "wrap": True
-                }
+                    "size": "sm",
+                    "margin": "sm",
+                    "wrap": True,
+                },
             ]
         )
 
+        if remaining_calories >= 0:
+
+            remaining_text = (
+                "今天還可以吃約 "
+                f"{round(remaining_calories)} kcal"
+            )
+
+        else:
+
+            remaining_text = (
+                "今天目前超過目標約 "
+                f"{round(abs(remaining_calories))} kcal"
+            )
+
+        body.append(
+            {
+                "type": "text",
+                "text": remaining_text,
+                "weight": "bold",
+                "margin": "md",
+                "wrap": True,
+            }
+        )
+
     # -----------------------------------------------------
-    # 還沒有個人資料
+    # 沒有個人資料也完全可以使用
     # -----------------------------------------------------
 
     else:
 
         body.extend(
             [
-
                 {
                     "type": "text",
                     "text": (
                         f"🔥 {round(today['calories'])} kcal"
-                        "｜"
-                        f"🥩 {round(today['protein'], 1)} g"
                     ),
                     "size": "sm",
-                    "margin": "sm"
+                    "margin": "sm",
                 },
 
                 {
                     "type": "text",
                     "text": (
-                        "輸入「設定資料」"
-                        "可開啟每日目標 👤"
+                        "🥩 "
+                        f"{round(today['protein'], 1)} g"
+                        "｜🍚 "
+                        f"{round(today['carbs'], 1)} g"
+                        "｜🥑 "
+                        f"{round(today['fat'], 1)} g"
+                    ),
+                    "size": "sm",
+                    "margin": "sm",
+                    "wrap": True,
+                },
+
+                {
+                    "type": "text",
+                    "text": (
+                        "🥬 纖維 "
+                        f"{round(today['fiber'], 1)} g"
+                    ),
+                    "size": "sm",
+                    "margin": "sm",
+                },
+
+                {
+                    "type": "text",
+                    "text": (
+                        "👤 想看每日目標與剩餘額度，"
+                        "再輸入「設定資料」就好"
                     ),
                     "size": "xs",
                     "margin": "md",
-                    "wrap": True
-                }
+                    "wrap": True,
+                },
             ]
         )
 
@@ -745,10 +788,9 @@ def make_meal_card(
 
         body.extend(
             [
-
                 {
                     "type": "separator",
-                    "margin": "lg"
+                    "margin": "lg",
                 },
 
                 {
@@ -759,85 +801,76 @@ def make_meal_card(
                     ),
                     "size": "sm",
                     "wrap": True,
-                    "margin": "lg"
-                }
+                    "margin": "lg",
+                },
             ]
         )
 
     # -----------------------------------------------------
-    # 卡片
+    # Footer
     # -----------------------------------------------------
 
-    card = {
+    footer = {
+        "type": "box",
+        "layout": "vertical",
+        "spacing": "sm",
+        "contents": [
+            {
+                "type": "button",
+                "style": "primary",
+                "height": "sm",
+                "action": {
+                    "type": "message",
+                    "label": "✏️ 修正上一餐",
+                    "text": "我要修正上一餐",
+                },
+            },
 
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "contents": [
+                    {
+                        "type": "button",
+                        "style": "secondary",
+                        "height": "sm",
+                        "action": {
+                            "type": "message",
+                            "label": "📊 今天",
+                            "text": "查看今日紀錄",
+                        },
+                    },
+
+                    {
+                        "type": "button",
+                        "style": "secondary",
+                        "height": "sm",
+                        "action": {
+                            "type": "message",
+                            "label": "🗑️ 誤傳刪除",
+                            "text": "刪掉上一餐",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+    card = {
         "type": "bubble",
 
         "body": {
-
             "type": "box",
             "layout": "vertical",
             "paddingAll": "18px",
-            "contents": body
+            "contents": body,
         },
 
-        "footer": {
-
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
-
-            "contents": [
-
-                {
-                    "type": "button",
-                    "style": "primary",
-                    "height": "sm",
-
-                    "action": {
-                        "type": "message",
-                        "label": "✏️ 修正上一餐",
-                        "text": "我要修正上一餐"
-                    }
-                },
-
-                {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "spacing": "sm",
-
-                    "contents": [
-
-                        {
-                            "type": "button",
-                            "style": "secondary",
-                            "height": "sm",
-
-                            "action": {
-                                "type": "message",
-                                "label": "📊 今天",
-                                "text": "查看今日紀錄"
-                            }
-                        },
-
-                        {
-                            "type": "button",
-                            "style": "secondary",
-                            "height": "sm",
-
-                            "action": {
-                                "type": "message",
-                                "label": "🗑️ 刪上一餐",
-                                "text": "刪掉上一餐"
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
+        "footer": footer,
     }
 
     return FlexMessage(
-
         alt_text=(
             f"{meal_name}｜"
             f"{round(number(total.get('calories')))} kcal"
@@ -845,17 +878,15 @@ def make_meal_card(
 
         contents=FlexContainer.from_dict(
             card
-        )
+        ),
     )
 
 
 # =========================================================
-# 今日帳本
+# 今日飲食帳本
 # =========================================================
 
-def today_summary(
-    user_id
-):
+def today_summary(user_id):
 
     meals = get_today_meals(
         user_id
@@ -875,105 +906,114 @@ def today_summary(
 
         return (
             "📊 今天還沒有飲食紀錄。\n\n"
-            "食物照片丟過來，"
-            "我來幫你記 😎"
+            "直接丟餐點照片過來就可以，"
+            "不用先設定個人資料 😎"
         )
 
     lines = [
-
         "📊 今日飲食帳本",
-        ""
+        "",
     ]
 
     for meal in meals:
 
         meal_type = (
-            meal.get(
-                "meal_type"
-            )
+            meal.get("meal_type")
             or "餐點"
         )
 
         meal_name = (
-            meal.get(
-                "meal_name"
-            )
+            meal.get("meal_name")
             or "這一餐"
         )
 
         calories = round(
             number(
-                meal.get(
-                    "calories"
-                )
+                meal.get("calories")
             )
         )
 
         lines.append(
             f"{meal_type}｜"
-            f"{meal_name}  "
+            f"{meal_name}　"
             f"🔥 {calories} kcal"
         )
 
     lines.extend(
         [
-
             "",
-
             "──────────",
-
             f"🔥 {round(totals['calories'])} kcal",
 
             (
                 f"🥩 {round(totals['protein'], 1)} g"
                 "｜"
                 f"🍚 {round(totals['carbs'], 1)} g"
-                "｜"
+            ),
+
+            (
                 f"🥑 {round(totals['fat'], 1)} g"
-            )
+                "｜"
+                f"🥬 {round(totals['fiber'], 1)} g"
+            ),
         ]
     )
 
     if profile:
 
-        target = number(
+        calorie_target = number(
             profile.get(
                 "calorie_target"
             )
         )
 
         remaining = (
-            target
+            calorie_target
             - totals["calories"]
         )
 
         lines.extend(
             [
-
                 "",
-
-                f"🎯 今日目標 "
-                f"{round(target)} kcal",
-
                 (
-                    "還可以吃約 "
-                    f"{max(0, round(remaining))} kcal"
-                )
+                    "🎯 今日目標 "
+                    f"{round(calorie_target)} kcal"
+                ),
             ]
         )
 
-    return "\n".join(
-        lines
-    )
+        if remaining >= 0:
+
+            lines.append(
+                "🔥 還可以吃約 "
+                f"{round(remaining)} kcal"
+            )
+
+        else:
+
+            lines.append(
+                "🔥 目前超過目標約 "
+                f"{round(abs(remaining))} kcal"
+            )
+
+    else:
+
+        lines.extend(
+            [
+                "",
+                "👤 尚未設定個人目標",
+                "想看剩餘額度時再輸入「設定資料」即可。",
+            ]
+        )
+
+    return "\n".join(lines)
 
 
 # =========================================================
-# 今天還能吃多少
+# 剩餘額度
 # =========================================================
 
-def remaining_reply(
-    user_id
-):
+def remaining_reply(user_id):
 
     profile = get_profile(
         user_id
@@ -988,9 +1028,14 @@ def remaining_reply(
     if not profile:
 
         return (
-            "先輸入「設定資料」建立"
-            "身高、體重和目標，"
-            "我才知道你今天還有多少額度 😎"
+            "📊 我可以照樣幫你算今天吃了多少，"
+            "只是還不知道你的個人目標。\n\n"
+            f"目前累計：🔥 {round(totals['calories'])} kcal\n"
+            f"🥩 {round(totals['protein'], 1)} g"
+            f"｜🍚 {round(totals['carbs'], 1)} g"
+            f"｜🥑 {round(totals['fat'], 1)} g\n\n"
+            "如果想知道「還能吃多少」，"
+            "輸入「設定資料」就可以 👤"
         )
 
     calorie_target = number(
@@ -1015,7 +1060,7 @@ def remaining_reply(
         - totals["protein"]
     )
 
-    if remaining > 0:
+    if remaining >= 0:
 
         return (
             "📊 今天目前\n\n"
@@ -1024,27 +1069,26 @@ def remaining_reply(
             f"還有約 {round(remaining)} kcal\n\n"
             f"🥩 蛋白質還差約 "
             f"{max(0, round(protein_remaining))} g\n\n"
-            "額度還活著，先別急著開珍奶慶功 😂"
+            "額度還活著，"
+            "先不用跟晚餐告別 😂"
         )
 
     return (
         "📊 今天目前\n\n"
-        f"🔥 {round(totals['calories'])} kcal\n"
-        f"約超過目標 "
+        f"🔥 {round(totals['calories'])}"
+        f" / {round(calorie_target)} kcal\n"
+        f"目前約超過 "
         f"{round(abs(remaining))} kcal\n\n"
-        "不用演災難片 😂 "
-        "下一餐正常吃，"
-        "蛋白質和蔬菜顧好就行。"
+        "一天超過一點不用演災難片 😂 "
+        "後面正常吃就好。"
     )
 
 
 # =========================================================
-# 圖片速度優化
+# 圖片壓縮
 # =========================================================
 
-def compress_image(
-    image_bytes
-):
+def compress_image(image_bytes):
 
     try:
 
@@ -1058,11 +1102,12 @@ def compress_image(
             "RGB"
         )
 
-        # 不放大，只縮小過大的照片
+        # 長邊最多 1280
+        # 不會把小圖硬放大
         image.thumbnail(
             (
                 1280,
-                1280
+                1280,
             )
         )
 
@@ -1072,12 +1117,24 @@ def compress_image(
             output,
             format="JPEG",
             quality=82,
-            optimize=True
+            optimize=True,
+        )
+
+        compressed = (
+            output.getvalue()
+        )
+
+        print(
+            "IMAGE_SIZE:",
+            len(image_bytes),
+            "->",
+            len(compressed),
+            flush=True,
         )
 
         return (
-            output.getvalue(),
-            "image/jpeg"
+            compressed,
+            "image/jpeg",
         )
 
     except Exception as e:
@@ -1085,30 +1142,33 @@ def compress_image(
         print(
             "IMAGE_COMPRESSION_ERROR:",
             repr(e),
-            flush=True
+            flush=True,
         )
 
-        # 壓縮失敗也不要讓整個 BOT 死掉
         return (
             image_bytes,
-            "image/jpeg"
+            "image/jpeg",
         )
 
 
 # =========================================================
-# 個人資料說明
+# 個人資料輸入說明
 # =========================================================
 
 def profile_help():
 
     return (
-        "👤 把資料一次傳給我就好，例如：\n\n"
+        "👤 想開啟個人熱量目標的話，"
+        "把資料一次傳給我：\n\n"
+        "例如：\n"
         "身高160 體重65 年齡28 女\n"
         "活動量輕量 目標減脂\n\n"
-        "活動量可以填：\n"
+        "活動量：\n"
         "久坐／輕量／中等／高／非常高\n\n"
         "目標：\n"
-        "減脂／維持／增肌"
+        "減脂／維持／增肌\n\n"
+        "不想設定也沒關係，"
+        "照樣可以直接拍照記錄。"
     )
 
 
@@ -1118,7 +1178,7 @@ def profile_help():
 
 @handler.add(
     MessageEvent,
-    message=TextMessageContent
+    message=TextMessageContent,
 )
 def handle_text(event):
 
@@ -1126,57 +1186,57 @@ def handle_text(event):
         event
     )
 
-    text = event.message.text.strip()
+    text = (
+        event.message.text.strip()
+    )
 
     try:
 
         # -------------------------------------------------
-        # 常用功能：
-        # 不需要 AI 的就不要浪費時間叫 AI
+        # 快速指令
+        # 這些不叫 AI，回覆更快也省費用
         # -------------------------------------------------
 
         if text == "設定資料":
 
             reply_text(
                 event.reply_token,
-                profile_help()
+                profile_help(),
             )
 
             return
 
 
         if text in [
-
             "查看今日紀錄",
             "今日紀錄",
             "今天吃了什麼",
             "今天吃多少",
             "今天幾卡",
-            "今天多少熱量"
+            "今天多少熱量",
         ]:
 
             reply_text(
                 event.reply_token,
                 today_summary(
                     user_id
-                )
+                ),
             )
 
             return
 
 
         if text in [
-
             "今天還能吃多少",
             "還能吃多少",
-            "剩多少熱量"
+            "剩多少熱量",
         ]:
 
             reply_text(
                 event.reply_token,
                 remaining_reply(
                     user_id
-                )
+                ),
             )
 
             return
@@ -1184,85 +1244,98 @@ def handle_text(event):
 
         if text == "我要修正上一餐":
 
-            last_meal = get_last_meal(
-                user_id
+            last_meal = (
+                get_last_meal(
+                    user_id
+                )
             )
 
             if not last_meal:
 
                 reply_text(
                     event.reply_token,
-                    "還沒有上一餐可以修啦 😭"
+                    "還沒有上一餐可以修啦 😭",
                 )
 
                 return
 
             reply_text(
                 event.reply_token,
-
-                "✏️ 直接告訴我哪裡要改。\n\n"
-                "例如：\n"
-                "• 飯只吃一半\n"
-                "• 這是牛排不是豬排\n"
-                "• 豆漿是無糖\n"
-                "• 那杯我沒喝\n"
-                "• 我只吃了一半"
+                (
+                    "✏️ 直接跟我講哪裡不對：\n\n"
+                    "「飯其實只有半碗」\n"
+                    "「這是牛排不是豬排」\n"
+                    "「豆漿是無糖」\n"
+                    "「那杯我沒喝」\n"
+                    "「雞腿我只吃一半」\n"
+                    "「還有一顆茶葉蛋」\n\n"
+                    "不用照格式講，我看得懂人話 😎"
+                ),
             )
 
             return
 
 
         if text in [
-
             "刪掉上一餐",
-            "刪除上一餐"
+            "刪除上一餐",
+            "剛剛傳錯了",
+            "上一餐傳錯了",
         ]:
 
-            last_meal = get_last_meal(
-                user_id
+            last_meal = (
+                get_last_meal(
+                    user_id
+                )
             )
 
             if not last_meal:
 
                 reply_text(
                     event.reply_token,
-                    "沒有上一餐可以刪啦 😂"
+                    "沒有上一餐可以刪啦 😂",
                 )
 
                 return
 
             delete_meal(
                 last_meal["id"],
-                user_id
+                user_id,
             )
 
             reply_text(
                 event.reply_token,
-
-                "🗑️ 好，上一餐已經刪掉。\n\n"
-                + today_summary(
-                    user_id
-                )
+                (
+                    "🗑️ 好，剛剛那餐刪掉了。\n"
+                    "今日熱量也一起扣回去了。\n\n"
+                    + today_summary(
+                        user_id
+                    )
+                ),
             )
 
             return
 
 
         # -------------------------------------------------
-        # 其他文字交給 AI 判斷真正意圖
+        # 其餘自然語言交給 AI 分類
         # -------------------------------------------------
 
-        intent_data = classify_user_text(
-            text
+        intent_data = (
+            classify_user_text(
+                text
+            )
         )
 
-        intent = intent_data[
-            "intent"
-        ]
+        intent = (
+            intent_data.get(
+                "intent"
+            )
+        )
 
 
         # -------------------------------------------------
-        # 設定個人資料
+        # 個人資料
         # -------------------------------------------------
 
         if intent == "profile":
@@ -1275,39 +1348,28 @@ def handle_text(event):
             )
 
             required_fields = [
-
                 "height_cm",
                 "weight_kg",
                 "age",
                 "sex",
                 "activity_level",
-                "goal"
+                "goal",
             ]
 
             missing = [
-
                 field
-                for field
-                in required_fields
-
-                if profile.get(
-                    field
-                )
-                is None
+                for field in required_fields
+                if profile.get(field) is None
             ]
 
             if missing:
 
                 reply_text(
                     event.reply_token,
-                    profile_help()
+                    profile_help(),
                 )
 
                 return
-
-            # ---------------------------------------------
-            # 活動量正規化
-            # ---------------------------------------------
 
             activity_text = str(
                 profile[
@@ -1315,120 +1377,121 @@ def handle_text(event):
                 ]
             )
 
-            for activity in [
+            # 非常高一定要先判斷
+            # 不然會被「高」先吃掉
+            if "非常高" in activity_text:
+                activity_level = "非常高"
 
-                "久坐",
-                "輕量",
-                "中等",
-                "非常高",
-                "高"
-            ]:
+            elif "久坐" in activity_text:
+                activity_level = "久坐"
 
-                if activity in activity_text:
+            elif "輕" in activity_text:
+                activity_level = "輕量"
 
-                    profile[
-                        "activity_level"
-                    ] = activity
+            elif "中" in activity_text:
+                activity_level = "中等"
 
-                    break
+            elif "高" in activity_text:
+                activity_level = "高"
 
+            else:
+                activity_level = "輕量"
 
-            # ---------------------------------------------
-            # 目標正規化
-            # ---------------------------------------------
+            profile[
+                "activity_level"
+            ] = activity_level
+
 
             goal_text = str(
-                profile[
-                    "goal"
-                ]
+                profile["goal"]
             )
 
             if "減" in goal_text:
-
                 profile["goal"] = "減脂"
 
             elif "增" in goal_text:
-
                 profile["goal"] = "增肌"
 
             else:
-
                 profile["goal"] = "維持"
 
 
-            profile = calculate_targets(
-                profile
+            profile = (
+                calculate_targets(
+                    profile
+                )
             )
 
             save_profile(
                 user_id,
-                profile
+                profile,
             )
 
             reply_text(
                 event.reply_token,
+                (
+                    "👤 個人模式開好了！\n\n"
 
-                "👤 個人資料設定完成！\n\n"
+                    f"🔥 BMR 約 {profile['bmr']} kcal\n"
+                    f"⚡ TDEE 約 {profile['tdee']} kcal\n\n"
 
-                f"🔥 BMR：約 "
-                f"{profile['bmr']} kcal\n"
+                    f"🎯 每日熱量 "
+                    f"{profile['calorie_target']} kcal\n"
 
-                f"⚡ TDEE：約 "
-                f"{profile['tdee']} kcal\n\n"
+                    f"🥩 蛋白質 "
+                    f"{profile['protein_target']} g\n"
 
-                f"🎯 每日目標："
-                f"{profile['calorie_target']} kcal\n"
+                    f"🍚 碳水 "
+                    f"{profile['carbs_target']} g\n"
 
-                f"🥩 蛋白質："
-                f"{profile['protein_target']} g\n"
+                    f"🥑 脂肪 "
+                    f"{profile['fat_target']} g\n"
 
-                f"🍚 碳水："
-                f"{profile['carbs_target']} g\n"
+                    f"🥬 纖維 "
+                    f"{profile['fiber_target']} g\n\n"
 
-                f"🥑 脂肪："
-                f"{profile['fat_target']} g\n"
-
-                f"🥬 纖維："
-                f"{profile['fiber_target']} g\n\n"
-
-                "之後每餐我都會直接幫你算"
-                "今天還剩多少額度 😎"
+                    "之後拍每一餐，我都會順便告訴你"
+                    "今天還剩多少額度 😎"
+                ),
             )
 
             return
 
 
         # -------------------------------------------------
-        # 修正上一餐 / 新增上一餐食物
+        # 修正 / 補記上一餐
         # -------------------------------------------------
 
         if intent in [
-
             "correct_last",
-            "add_to_last"
+            "add_to_last",
         ]:
 
-            last_meal = get_last_meal(
-                user_id
+            last_meal = (
+                get_last_meal(
+                    user_id
+                )
             )
 
             if not last_meal:
 
                 reply_text(
                     event.reply_token,
-
-                    "我找不到上一餐可以改 😭\n"
-                    "先傳一張餐點照片給我。"
+                    (
+                        "我找不到上一餐可以改 😭\n"
+                        "先傳一張餐點照片給我。"
+                    ),
                 )
 
                 return
+
 
             if intent == "add_to_last":
 
                 corrected_data = (
                     add_food_to_analysis(
                         last_meal,
-                        text
+                        text,
                     )
                 )
 
@@ -1437,109 +1500,103 @@ def handle_text(event):
                 corrected_data = (
                     correct_food_analysis(
                         last_meal,
-                        text
+                        text,
                     )
                 )
 
+
             update_meal(
                 last_meal["id"],
-                corrected_data
+                corrected_data,
             )
 
 
             # ---------------------------------------------
-            # 只有明確長期習慣才建立食物記憶
+            # 明確說是固定習慣才永久記住
             # ---------------------------------------------
 
             memory_keywords = [
-
                 "常喝",
                 "常吃",
                 "固定",
                 "記住",
-                "以後都是"
+                "以後都是",
+                "每次都是",
+                "平常都",
             ]
 
             if any(
                 keyword in text
-                for keyword
-                in memory_keywords
+                for keyword in memory_keywords
             ):
 
                 add_food_memory(
-
                     user_id,
-
                     text,
-
-                    data=corrected_data
+                    data=corrected_data,
                 )
 
 
             reply_messages(
-
                 event.reply_token,
-
                 [
-
                     make_meal_card(
-
                         corrected_data,
-
                         get_today_totals(
                             user_id
                         ),
-
                         get_profile(
                             user_id
                         ),
-
-                        corrected=True
+                        corrected=True,
                     )
-                ]
+                ],
             )
 
             return
 
 
         # -------------------------------------------------
-        # AI 判斷為刪除上一餐
+        # AI 判斷為刪除
         # -------------------------------------------------
 
         if intent == "delete_last":
 
-            last_meal = get_last_meal(
-                user_id
+            last_meal = (
+                get_last_meal(
+                    user_id
+                )
             )
 
             if not last_meal:
 
                 reply_text(
                     event.reply_token,
-                    "沒有上一餐可以刪啦 😂"
+                    "沒有上一餐可以刪啦 😂",
                 )
 
                 return
 
             delete_meal(
                 last_meal["id"],
-                user_id
+                user_id,
             )
 
             reply_text(
                 event.reply_token,
-
-                "🗑️ 上一餐刪掉了。\n\n"
-                + today_summary(
-                    user_id
-                )
+                (
+                    "🗑️ 好，上一餐刪除了。\n\n"
+                    + today_summary(
+                        user_id
+                    )
+                ),
             )
 
             return
 
 
         # -------------------------------------------------
-        # 查看今天
+        # 今日帳本
         # -------------------------------------------------
 
         if intent == "today":
@@ -1548,7 +1605,7 @@ def handle_text(event):
                 event.reply_token,
                 today_summary(
                     user_id
-                )
+                ),
             )
 
             return
@@ -1564,14 +1621,14 @@ def handle_text(event):
                 event.reply_token,
                 remaining_reply(
                     user_id
-                )
+                ),
             )
 
             return
 
 
         # -------------------------------------------------
-        # 食物記憶
+        # 永久食物記憶
         # -------------------------------------------------
 
         if intent == "remember_food":
@@ -1585,48 +1642,47 @@ def handle_text(event):
 
             add_food_memory(
                 user_id,
-                memory_text
+                memory_text,
             )
 
             reply_text(
                 event.reply_token,
-
-                "🧠 好，這個我記住了。\n"
-                "下次看到合理相符的餐點，"
-                "我會優先參考這個習慣。"
+                (
+                    "🧠 記住了。\n"
+                    "下次照片合理相符時，"
+                    "我會優先參考這個習慣。\n\n"
+                    "但放心，我不會看到珍奶"
+                    "硬說它是無糖豆漿 😂"
+                ),
             )
 
             return
 
 
         # -------------------------------------------------
-        # 飲食建議 / 一般營養問題
+        # 晚餐建議 / 飲食問題
         # -------------------------------------------------
 
         if intent in [
-
             "meal_advice",
-            "food_question"
+            "food_question",
         ]:
 
             answer = food_chat(
-
                 text,
-
                 get_profile(
                     user_id
                 ),
-
                 totals_to_dict(
                     get_today_totals(
                         user_id
                     )
-                )
+                ),
             )
 
             reply_text(
                 event.reply_token,
-                answer
+                answer,
             )
 
             return
@@ -1638,12 +1694,13 @@ def handle_text(event):
 
         reply_text(
             event.reply_token,
-
-            "這題超出我的伙食費範圍了 😂\n"
-            "我是飲食 BOT 啦！\n\n"
-            "食物、熱量、減脂、"
-            "蛋白質、今天吃什麼，"
-            "這些再來找我 😎"
+            (
+                "這題超出我的伙食費範圍了 😂\n"
+                "我是飲食 BOT 啦。\n\n"
+                "食物、熱量、減脂、增肌、"
+                "今天吃什麼、還能吃多少，"
+                "這些再丟給我 😎"
+            ),
         )
 
 
@@ -1652,14 +1709,15 @@ def handle_text(event):
         print(
             "TEXT_ERROR:",
             repr(e),
-            flush=True
+            flush=True,
         )
 
         reply_text(
             event.reply_token,
-
-            "🥲 我剛剛腦袋打結了。\n"
-            "再跟我說一次，我重來。"
+            (
+                "🥲 我剛剛腦袋打結了。\n"
+                "再跟我說一次，我重來。"
+            ),
         )
 
 
@@ -1669,18 +1727,20 @@ def handle_text(event):
 
 @handler.add(
     MessageEvent,
-    message=ImageMessageContent
+    message=ImageMessageContent,
 )
 def handle_image(event):
 
-    user_id = get_user_id(
-        event
+    user_id = (
+        get_user_id(
+            event
+        )
     )
 
     try:
 
         # -------------------------------------------------
-        # 從 LINE 下載原圖
+        # 下載 LINE 圖片
         # -------------------------------------------------
 
         message_id = (
@@ -1689,21 +1749,19 @@ def handle_image(event):
 
         image_url = (
             "https://api-data.line.me/"
-            f"v2/bot/message/"
+            "v2/bot/message/"
             f"{message_id}/content"
         )
 
         response = requests.get(
-
             image_url,
 
             headers={
                 "Authorization":
-                    f"Bearer "
-                    f"{LINE_ACCESS_TOKEN}"
+                    f"Bearer {LINE_ACCESS_TOKEN}"
             },
 
-            timeout=20
+            timeout=20,
         )
 
         response.raise_for_status()
@@ -1714,7 +1772,7 @@ def handle_image(event):
 
 
         # -------------------------------------------------
-        # V2：先縮圖，減少 AI 傳輸時間
+        # V2 速度優化
         # -------------------------------------------------
 
         image_bytes, content_type = (
@@ -1743,46 +1801,48 @@ def handle_image(event):
 
 
         # -------------------------------------------------
-        # 取得個人食物記憶
+        # 個人食物記憶
         # -------------------------------------------------
 
-        memories = get_food_memories(
-            user_id,
-            limit=12
-        )
-
-
-        # -------------------------------------------------
-        # AI 一次完成分析
-        # -------------------------------------------------
-
-        food_data = (
-            analyze_food_image(
-                data_url,
-                memories
+        memories = (
+            get_food_memories(
+                user_id,
+                limit=12,
             )
         )
 
 
         # -------------------------------------------------
-        # 儲存餐點
+        # AI 一次完成
+        # -------------------------------------------------
+
+        food_data = (
+            analyze_food_image(
+                data_url,
+                memories,
+            )
+        )
+
+
+        # -------------------------------------------------
+        # 儲存
         # -------------------------------------------------
 
         meal_id = save_meal(
             user_id,
-            food_data
+            food_data,
         )
 
         print(
             "MEAL_SAVED:",
             f"user={user_id}",
             f"meal_id={meal_id}",
-            flush=True
+            flush=True,
         )
 
 
         # -------------------------------------------------
-        # 今日累計
+        # 取得今日累計 + 個人資料
         # -------------------------------------------------
 
         today_totals = (
@@ -1791,32 +1851,27 @@ def handle_image(event):
             )
         )
 
-        profile = get_profile(
-            user_id
+        profile = (
+            get_profile(
+                user_id
+            )
         )
 
 
         # -------------------------------------------------
-        # 回覆漂亮卡片
+        # 回覆卡片
         # -------------------------------------------------
 
         reply_messages(
-
             event.reply_token,
-
             [
-
                 make_meal_card(
-
                     food_data,
-
                     today_totals,
-
                     profile,
-
-                    corrected=False
+                    corrected=False,
                 )
-            ]
+            ],
         )
 
 
@@ -1825,16 +1880,17 @@ def handle_image(event):
         print(
             "IMAGE_ERROR:",
             repr(e),
-            flush=True
+            flush=True,
         )
 
         reply_text(
             event.reply_token,
-
-            "🥲 這餐分析翻車了。\n"
-            "再傳一次給我。\n\n"
-            "如果連續翻車，"
-            "我們就去 Render 抓兇手 😂"
+            (
+                "🥲 這餐分析翻車了。\n"
+                "再傳一次給我。\n\n"
+                "如果連續翻車，"
+                "我們就去 Render 抓兇手 😂"
+            ),
         )
 
 
@@ -1847,11 +1903,11 @@ if __name__ == "__main__":
     port = int(
         os.environ.get(
             "PORT",
-            5000
+            5000,
         )
     )
 
     app.run(
         host="0.0.0.0",
-        port=port
+        port=port,
     )
