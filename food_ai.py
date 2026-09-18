@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import random
 
 from openai import OpenAI
 
@@ -651,21 +652,22 @@ FOOD_SCHEMA = {
 # =========================================================
 
 INTENT_SCHEMA = {
-
     "type": "object",
-
     "properties": {
-
         "intent": {
-
             "type": "string",
-
             "enum": [
                 "profile",
+                "custom_targets",
+                "reset_targets",
                 "correct_last",
                 "delete_last",
                 "add_to_last",
+                "set_meal_type",
+                "reset_today",
                 "today",
+                "month_report",
+                "weight_log",
                 "remaining",
                 "meal_advice",
                 "remember_food",
@@ -673,93 +675,57 @@ INTENT_SCHEMA = {
                 "other"
             ]
         },
-
-        "reply": {
-            "type": "string"
-        },
-
+        "reply": {"type": "string"},
         "profile": {
-
-            "type": [
-                "object",
-                "null"
-            ],
-
+            "type": ["object", "null"],
             "properties": {
-
-                "height_cm": {
-                    "type": [
-                        "number",
-                        "null"
-                    ]
-                },
-
-                "weight_kg": {
-                    "type": [
-                        "number",
-                        "null"
-                    ]
-                },
-
-                "age": {
-                    "type": [
-                        "integer",
-                        "null"
-                    ]
-                },
-
-                "sex": {
-                    "type": [
-                        "string",
-                        "null"
-                    ]
-                },
-
-                "activity_level": {
-                    "type": [
-                        "string",
-                        "null"
-                    ]
-                },
-
-                "goal": {
-                    "type": [
-                        "string",
-                        "null"
-                    ]
-                }
+                "height_cm": {"type": ["number", "null"]},
+                "weight_kg": {"type": ["number", "null"]},
+                "age": {"type": ["integer", "null"]},
+                "sex": {"type": ["string", "null"]},
+                "activity_level": {"type": ["string", "null"]},
+                "goal": {"type": ["string", "null"]}
             },
-
             "required": [
-                "height_cm",
-                "weight_kg",
-                "age",
-                "sex",
-                "activity_level",
-                "goal"
+                "height_cm", "weight_kg", "age", "sex",
+                "activity_level", "goal"
             ],
-
             "additionalProperties": False
         },
-
-        "memory_text": {
-            "type": [
-                "string",
-                "null"
-            ]
-        }
+        "targets": {
+            "type": ["object", "null"],
+            "properties": {
+                "calorie_target": {"type": ["number", "null"]},
+                "protein_target": {"type": ["number", "null"]},
+                "carbs_target": {"type": ["number", "null"]},
+                "fat_target": {"type": ["number", "null"]},
+                "fiber_target": {"type": ["number", "null"]},
+                "scope": {"type": ["string", "null"], "enum": ["today", "permanent", null]},
+                "mode_name": {"type": ["string", "null"]}
+            },
+            "required": [
+                "calorie_target", "protein_target", "carbs_target",
+                "fat_target", "fiber_target", "scope", "mode_name"
+            ],
+            "additionalProperties": False
+        },
+        "meal_type": {
+            "type": ["string", "null"],
+            "enum": ["早餐", "午餐", "晚餐", "點心", null]
+        },
+        "target_date": {"type": ["string", "null"]},
+        "report_year": {"type": ["integer", "null"]},
+        "report_month": {"type": ["integer", "null"]},
+        "weight_kg": {"type": ["number", "null"]},
+        "memory_text": {"type": ["string", "null"]}
     },
-
     "required": [
-        "intent",
-        "reply",
-        "profile",
+        "intent", "reply", "profile", "targets", "meal_type",
+        "target_date", "report_year", "report_month", "weight_kg",
         "memory_text"
     ],
-
     "additionalProperties": False
 }
-
 
 # =========================================================
 # Structured Output 共用函式
@@ -1169,116 +1135,114 @@ def add_food_to_analysis(
 def classify_user_text(text):
 
     instructions = """
-你是飲食紀錄 App 的自然語言意圖路由器。
+你是台灣飲食紀錄 App 的自然語言意圖路由器。
+你的任務是「判斷使用者想做什麼」，不要寫長篇營養文章。
 
-你的工作不是回答營養問題，
-而是判斷使用者現在想做什麼。
+最重要：只要與飲食、營養、熱量、三大營養素、體重、個人資料、餐點紀錄有關，就不是 other。
+不要因為句子口語、簡短或不完整就亂判成 other。
 
-可使用的 intent：
+可用 intent：
 
 profile
-=
-設定或更新：
-身高、體重、年齡、生理性別、
-活動量、減脂／維持／增肌目標。
+= 設定或更新身高、體重、年齡、生理性別、活動量、減脂/維持/增肌。
+若只是回「男」「女」且上下文可能正在補個人資料，也可判 profile。
+
+custom_targets
+= 使用者想修改自己吃的熱量、蛋白質、碳水、脂肪、纖維目標。
+例如：
+「今天碳水改80g」
+「今天低碳，蛋白質80、碳水80、脂肪45」
+「蛋白質我想改85g」
+「以後脂肪抓45g」
+「我不想低碳日吃那麼多脂肪蛋白質」如果是在要求修改目標，也屬於此類。
+
+scope：
+- 有「今天／今日／低碳日」等單日語意 → today
+- 有「以後／平常／每天／固定」 → permanent
+- 無法判斷時，若句子明確說今天則 today，否則 permanent
+
+只抽取使用者明確提供的數字，不要自行補湊三大營養素。
+「低碳」但沒給數字時，targets 數值可全部 null，mode_name 填「低碳日」。
+
+reset_targets
+= 恢復系統建議、取消自訂營養目標、今天恢復預設。
+若明確說今天，target_date 填「今天」；否則視為永久自訂恢復。
 
 correct_last
-=
-修正上一餐。
-例如：
-飯只吃一半
-不是豬排是牛排
-豆漿是無糖
-那杯沒喝
-那個我沒吃
+= 修正上一餐內容或份量，例如「飯只吃一半」「地瓜其實更多」「不是豬排是牛排」。
 
 delete_last
-=
-刪除上一餐。
+= 刪除上一餐。
 
 add_to_last
-=
-在上一餐新增食物。
-例如：
-再加一顆蛋
-還有一根香蕉
-漏掉一杯豆漿
+= 在上一餐新增食物，例如「再加一顆蛋」。
+
+set_meal_type
+= 指定或修改最近一餐的餐別，例如「這是早餐」「上一餐改成晚餐」「剛剛那張算午餐」。
+meal_type 必須填早餐/午餐/晚餐/點心。
+
+target_date：
+若使用者說今天填「今天」，昨天填「昨天」。沒有日期填 null。
+
+reset_today
+= 「重置今天」「清空今天紀錄」「今天測試的全部刪掉」。
+注意這是刪除今天所有餐點，不是刪個人資料。
 
 today
-=
-查看今天吃了什麼、
-今日總熱量或今日紀錄。
+= 查看今天吃了什麼、今日紀錄、今日總熱量。
+
+month_report
+= 查看本月或指定月份飲食總表。
+例如「這個月紀錄」「9月紀錄」「2026年8月總表」。
+能抽取年份月份就填 report_year/report_month，沒有年份可 null。
+
+weight_log
+= 明確記錄體重，例如「我今天58.2公斤」「今天體重58.2」。
+weight_kg 填數值；target_date 可填今天/昨天。
+如果句子是在修改個人資料的體重而不是紀錄今天體重，可判 profile。
 
 remaining
-=
-詢問今天還能吃多少、
-還剩多少熱量或營養額度。
+= 今天還能吃多少、剩多少熱量或營養額度。
 
 meal_advice
-=
-根據今天剩餘額度，
-詢問下一餐可以吃什麼。
-例如：
-晚餐可以吃什麼
-我等等可以吃麥當勞嗎
+= 根據今天剩餘額度問下一餐怎麼吃、晚餐吃什麼。
 
 remember_food
-=
-使用者明確要求系統記住
-自己的固定飲食習慣。
-
-例如：
-記住我都喝無糖豆漿
-這是我常吃的早餐
-我固定都是半碗飯
+= 明確要求記住固定飲食習慣，例如「記住我都喝無糖豆漿」。
+只有此 intent 填 memory_text。
 
 food_question
-=
-一般飲食、營養、熱量、
-減脂、蛋白質等問題。
+= 一般飲食、營養、熱量、減脂、蛋白質、碳水、脂肪、外食等正經問題。
 
 other
-=
-完全與飲食功能無關。
+= 完全與飲食 App 無關，例如感情八卦、數學亂問、人物關係、星座等。
+真的離題才用 other。
 
-如果使用者在設定 profile，
-請盡可能抽取：
-
-height_cm
-weight_kg
-age
-sex
-activity_level
-goal
-
-如果缺資料，
-缺少欄位使用 null。
-
-memory_text：
-
-只有 remember_food
-才填入適合保存的簡短記憶。
-
-其他 intent 請使用 null。
-
-reply：
-
-可以提供一句非常簡短的
-自然語言提示。
+reply 只要一句極短提示，不要長文。
+未使用的欄位一律填 null。
 """
 
     return structured_response(
-
         instructions,
-
         text,
-
         INTENT_SCHEMA,
-
-        "user_intent",
-
-        max_tokens=600
+        "user_intent_v4",
+        max_tokens=800
     )
+
+
+def off_topic_reply(text=None):
+    """朋友式輕嗆：只給真正離題的問題使用。"""
+    replies = [
+        "🙄 我是飲食 BOT，不是戶政事務所。你吃多少我比較有興趣。",
+        "😂 這題沒有熱量，我拒絕幫它入帳。問點能吃的啦。",
+        "你再亂問，我要開始算你講廢話消耗幾卡了 😎",
+        "感情問題請右轉，我這裡主要處理碳水化合物 😂",
+        "蛤？你是餓到開始亂問是不是。先問我今天還能吃多少啦 😂",
+        "這題跟蛋白質一樣——跟我有關係，但真的不多 😌",
+        "我管你吃什麼，不太管你愛誰 😂 下一題請問雞胸肉。",
+    ]
+    return random.choice(replies)
 
 
 # =========================================================
@@ -1344,6 +1308,10 @@ def food_chat(
 像朋友
 方便直接執行
 
+預設 3～7 行內回答。
+先直接回答問題，再補最多 2 個重點。
+除非使用者明確要求詳細說明，否則不要寫長篇文章、不要使用 Markdown 標題（#、##、###）或粗體符號 **。
+
 如果有個人每日目標與今日累計，
 優先依照剩餘熱量、
 蛋白質、碳水、脂肪額度回答。
@@ -1376,7 +1344,7 @@ def food_chat(
 
         input=context,
 
-        max_output_tokens=500,
+        max_output_tokens=320,
 
         store=False
     )
