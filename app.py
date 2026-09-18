@@ -2,6 +2,7 @@ import os
 import base64
 import io
 import requests
+import re
 
 from PIL import Image
 from flask import Flask, request, abort
@@ -41,6 +42,8 @@ from database import (
     get_today_totals,
     save_profile,
     get_profile,
+    update_profile_fields,
+    get_missing_profile_fields,
     add_food_memory,
     get_food_memories,
 )
@@ -85,7 +88,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V2 is running!"
+    return "LINE Food AI Bot V3 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -218,6 +221,331 @@ def totals_to_dict(totals):
             or 0
         ),
     }
+
+
+# =========================================================
+# V3：個人資料工具
+# =========================================================
+
+PROFILE_LABELS = {
+    "height_cm": "身高",
+    "weight_kg": "體重",
+    "age": "年齡",
+    "sex": "生理性別",
+    "activity_level": "活動量",
+    "goal": "目標",
+}
+
+
+def profile_is_complete(profile):
+    if not profile:
+        return False
+
+    required = [
+        "height_cm",
+        "weight_kg",
+        "age",
+        "sex",
+        "activity_level",
+        "goal",
+    ]
+
+    return all(
+        profile.get(field) not in [None, ""]
+        for field in required
+    )
+
+
+def profile_has_targets(profile):
+    return (
+        profile_is_complete(profile)
+        and number(profile.get("calorie_target")) > 0
+    )
+
+
+def normalize_sex(value):
+    text = str(value or "").strip().lower()
+
+    if text in ["男", "男性", "male", "m"]:
+        return "男"
+
+    if text in ["女", "女性", "female", "f"]:
+        return "女"
+
+    return None
+
+
+def normalize_activity(value):
+    text = str(value or "").strip()
+
+    if "非常高" in text:
+        return "非常高"
+    if "久坐" in text:
+        return "久坐"
+    if "輕" in text:
+        return "輕量"
+    if "中" in text:
+        return "中等"
+    if "高" in text:
+        return "高"
+
+    return None
+
+
+def normalize_goal(value):
+    text = str(value or "").strip()
+
+    if "減" in text:
+        return "減脂"
+    if "增" in text:
+        return "增肌"
+    if "維持" in text or "保持" in text:
+        return "維持"
+
+    return None
+
+
+def extract_profile_updates(text, current_profile=None):
+    """
+    不靠 AI 也能抓常見個人資料說法。
+    例如：
+    身高162 體重59 年齡27 久坐 減脂
+    我現在58公斤
+    活動量改輕量
+    女
+    """
+    current_profile = current_profile or {}
+    updates = {}
+    raw = text.strip()
+
+    patterns = [
+        ("height_cm", r"(?:身高\s*)?(\d{2,3}(?:\.\d+)?)\s*(?:cm|公分)"),
+        ("weight_kg", r"(?:體重\s*)?(\d{2,3}(?:\.\d+)?)\s*(?:kg|公斤)"),
+        ("age", r"(?:年齡\s*)?(\d{1,3})\s*歲"),
+    ]
+
+    # 有明確欄位名稱時，即使沒單位也抓
+    named_patterns = [
+        ("height_cm", r"身高\s*[:：]?\s*(\d{2,3}(?:\.\d+)?)"),
+        ("weight_kg", r"體重\s*[:：]?\s*(\d{2,3}(?:\.\d+)?)"),
+        ("age", r"年齡\s*[:：]?\s*(\d{1,3})"),
+    ]
+
+    for field, pattern in patterns + named_patterns:
+        match = re.search(pattern, raw, flags=re.I)
+        if match:
+            value = float(match.group(1))
+            if field == "age":
+                value = int(value)
+            updates[field] = value
+
+    # 「我現在58公斤」這類
+    if "weight_kg" not in updates:
+        match = re.search(
+            r"(?:現在|目前|變成|改成|降到|升到)\s*(\d{2,3}(?:\.\d+)?)\s*(?:kg|公斤)",
+            raw,
+            flags=re.I,
+        )
+        if match:
+            updates["weight_kg"] = float(match.group(1))
+
+    # 性別
+    if re.search(r"(^|[\s，,、])(?:生理)?性別\s*[:：]?\s*男(?:性)?", raw) or raw in ["男", "男性"]:
+        updates["sex"] = "男"
+    elif re.search(r"(^|[\s，,、])(?:生理)?性別\s*[:：]?\s*女(?:性)?", raw) or raw in ["女", "女性"]:
+        updates["sex"] = "女"
+    else:
+        # 完整資料句中常直接寫「女／男」
+        if re.search(r"(^|[\s，,、])女(?:性)?($|[\s，,、])", raw):
+            updates["sex"] = "女"
+        elif re.search(r"(^|[\s，,、])男(?:性)?($|[\s，,、])", raw):
+            updates["sex"] = "男"
+
+    activity = normalize_activity(raw)
+    if activity:
+        updates["activity_level"] = activity
+
+    goal = normalize_goal(raw)
+    if goal:
+        updates["goal"] = goal
+
+    return updates
+
+
+def merge_profile(profile, updates):
+    merged = dict(profile or {})
+    merged.update(
+        {
+            key: value
+            for key, value in (updates or {}).items()
+            if value is not None
+        }
+    )
+    return merged
+
+
+def missing_profile_text(profile):
+    required = [
+        "height_cm",
+        "weight_kg",
+        "age",
+        "sex",
+        "activity_level",
+        "goal",
+    ]
+
+    missing = [
+        field
+        for field in required
+        if not profile or profile.get(field) in [None, ""]
+    ]
+
+    if not missing:
+        return None
+
+    labels = [PROFILE_LABELS[field] for field in missing]
+
+    if missing == ["sex"]:
+        return (
+            "👤 前面的資料收到並存好了！\n"
+            "現在只差「生理性別」。\n\n"
+            "回我「男」或「女」就好～"
+        )
+
+    return (
+        "👤 已先幫你存下來。\n"
+        "還差：" + "、".join(labels) + "\n\n"
+        "缺的資料直接補給我就好，不用全部重打。"
+    )
+
+
+def profile_summary(profile):
+    if not profile:
+        return (
+            "👤 你目前還沒有個人資料。\n"
+            "直接輸入「設定資料」就可以開始。"
+        )
+
+    lines = ["👤 我的資料"]
+
+    basic = []
+    if profile.get("height_cm") is not None:
+        basic.append(f"{round(number(profile['height_cm']), 1):g} cm")
+    if profile.get("weight_kg") is not None:
+        basic.append(f"{round(number(profile['weight_kg']), 1):g} kg")
+    if profile.get("age") is not None:
+        basic.append(f"{int(profile['age'])}歲")
+    if profile.get("sex"):
+        basic.append(str(profile["sex"]))
+
+    if basic:
+        lines.append("｜".join(basic))
+
+    second = []
+    if profile.get("activity_level"):
+        second.append(f"活動量：{profile['activity_level']}")
+    if profile.get("goal"):
+        second.append(f"目標：{profile['goal']}")
+
+    if second:
+        lines.append("｜".join(second))
+
+    if profile_has_targets(profile):
+        lines.extend(
+            [
+                "",
+                f"🔥 BMR 約 {round(number(profile.get('bmr')))} kcal",
+                f"⚡ TDEE 約 {round(number(profile.get('tdee')))} kcal",
+                f"🎯 每日目標 {round(number(profile.get('calorie_target')))} kcal",
+                (
+                    f"🥩 {round(number(profile.get('protein_target')))}g"
+                    f"｜🍚 {round(number(profile.get('carbs_target')))}g"
+                    f"｜🥑 {round(number(profile.get('fat_target')))}g"
+                ),
+            ]
+        )
+    else:
+        missing = missing_profile_text(profile)
+        if missing:
+            lines.extend(["", missing])
+
+    return "\n".join(lines)
+
+
+def save_and_finish_profile(user_id, updates):
+    """
+    先部分存檔；完整後才計算 BMR/TDEE/營養目標。
+    """
+    if updates:
+        update_profile_fields(user_id, updates)
+
+    profile = get_profile(user_id)
+
+    if not profile_is_complete(profile):
+        return profile, False
+
+    calculated = calculate_targets(dict(profile))
+    save_profile(user_id, calculated)
+
+    return get_profile(user_id), True
+
+
+def compact_ai_text(text, max_lines=8, max_chars=430):
+    """
+    LINE 短答模式：
+    移除 Markdown 標記，避免一大篇作文。
+    """
+    if not text:
+        return "我剛剛沒整理出答案，再問我一次 😵‍💫"
+
+    cleaned = str(text)
+    cleaned = cleaned.replace("**", "")
+    cleaned = cleaned.replace("###", "")
+    cleaned = cleaned.replace("##", "")
+    cleaned = cleaned.replace("#", "")
+
+    lines = [
+        line.strip()
+        for line in cleaned.splitlines()
+        if line.strip()
+    ]
+
+    # 去掉太多重複空泛標題，保留前幾個重點
+    lines = lines[:max_lines]
+    result = "\n".join(lines)
+
+    if len(result) > max_chars:
+        result = result[:max_chars].rsplit("\n", 1)[0].rstrip()
+        if not result:
+            result = cleaned[:max_chars].rstrip()
+        result += "\n\n想看更詳細的再叫我展開 😎"
+
+    return result
+
+
+def looks_like_meal_correction(text):
+    """
+    把「地瓜其實比較多」「飯我只吃一半」這類自然句
+    優先視為上一餐修正，不要掉進一般聊天。
+    """
+    keywords = [
+        "其實", "不是", "應該是", "改成",
+        "比較多", "更多", "比較少", "少一點",
+        "一半", "半份", "沒吃", "沒喝",
+        "吃完", "只吃", "只喝", "被蓋",
+        "漏算", "算錯", "抓太少", "抓太多",
+    ]
+
+    food_context = [
+        "飯", "地瓜", "肉", "雞", "牛", "豬", "魚",
+        "蛋", "豆漿", "牛奶", "優格", "菜", "水果",
+        "麵", "飲料", "醬", "湯", "吐司", "饅頭",
+    ]
+
+    return (
+        any(k in text for k in keywords)
+        and any(k in text for k in food_context)
+    )
 
 
 # =========================================================
@@ -590,7 +918,7 @@ def make_meal_card(
     # 有個人資料
     # -----------------------------------------------------
 
-    if profile:
+    if profile_has_targets(profile):
 
         calorie_target = number(
             profile.get(
@@ -959,7 +1287,7 @@ def today_summary(user_id):
         ]
     )
 
-    if profile:
+    if profile_has_targets(profile):
 
         calorie_target = number(
             profile.get(
@@ -1025,7 +1353,7 @@ def remaining_reply(user_id):
         )
     )
 
-    if not profile:
+    if not profile_has_targets(profile):
 
         return (
             "📊 我可以照樣幫你算今天吃了多少，"
@@ -1158,18 +1486,16 @@ def compress_image(image_bytes):
 def profile_help():
 
     return (
-        "👤 想開啟個人熱量目標的話，"
-        "把資料一次傳給我：\n\n"
+        "👤 個人資料可以一次填，也可以慢慢補。\n\n"
         "例如：\n"
-        "身高160 體重65 年齡28 女\n"
-        "活動量輕量 目標減脂\n\n"
-        "活動量：\n"
-        "久坐／輕量／中等／高／非常高\n\n"
-        "目標：\n"
-        "減脂／維持／增肌\n\n"
-        "不想設定也沒關係，"
-        "照樣可以直接拍照記錄。"
+        "身高162 體重59 年齡27 女\n"
+        "久坐 減脂\n\n"
+        "需要：身高、體重、年齡、生理性別、活動量、目標。\n"
+        "活動量：久坐／輕量／中等／高／非常高\n"
+        "目標：減脂／維持／增肌\n\n"
+        "少填一項沒關係，我會先存，缺什麼只問什麼 😎"
     )
+
 
 
 # =========================================================
@@ -1191,6 +1517,104 @@ def handle_text(event):
     )
 
     try:
+
+        # -------------------------------------------------
+        # V3：個人資料快速處理
+        # -------------------------------------------------
+
+        current_profile = get_profile(user_id)
+
+        if text in [
+            "我的資料",
+            "查看我的資料",
+            "個人資料",
+            "我的個人資料",
+        ]:
+            reply_text(
+                event.reply_token,
+                profile_summary(current_profile),
+            )
+            return
+
+        profile_updates = extract_profile_updates(
+            text,
+            current_profile,
+        )
+
+        profile_words = [
+            "身高", "體重", "年齡", "性別",
+            "活動量", "久坐", "輕量", "中等",
+            "非常高", "減脂", "增肌", "維持",
+            "公斤", "kg", "公分", "cm", "歲",
+        ]
+
+        waiting_for_profile = (
+            current_profile
+            and not profile_is_complete(current_profile)
+        )
+
+        # 單獨回「男／女」只在正在補資料時視為 profile
+        standalone_sex = (
+            text in ["男", "女", "男性", "女性"]
+            and waiting_for_profile
+        )
+
+        if profile_updates and (
+            any(word.lower() in text.lower() for word in profile_words)
+            or standalone_sex
+        ):
+            profile, completed = save_and_finish_profile(
+                user_id,
+                profile_updates,
+            )
+
+            if completed:
+                reply_text(
+                    event.reply_token,
+                    (
+                        "✅ 個人資料已更新\n\n"
+                        + profile_summary(profile)
+                        + "\n\n之後每餐都會自動算今日進度。"
+                    ),
+                )
+            else:
+                reply_text(
+                    event.reply_token,
+                    missing_profile_text(profile),
+                )
+
+            return
+
+        # -------------------------------------------------
+        # V3：自然語言修正上一餐優先
+        # -------------------------------------------------
+
+        if looks_like_meal_correction(text):
+            last_meal = get_last_meal(user_id)
+
+            if last_meal:
+                corrected_data = correct_food_analysis(
+                    last_meal,
+                    text,
+                )
+
+                update_meal(
+                    last_meal["id"],
+                    corrected_data,
+                )
+
+                reply_messages(
+                    event.reply_token,
+                    [
+                        make_meal_card(
+                            corrected_data,
+                            get_today_totals(user_id),
+                            get_profile(user_id),
+                            corrected=True,
+                        )
+                    ],
+                )
+                return
 
         # -------------------------------------------------
         # 快速指令
@@ -1340,121 +1764,59 @@ def handle_text(event):
 
         if intent == "profile":
 
-            profile = (
-                intent_data.get(
-                    "profile"
-                )
+            incoming = (
+                intent_data.get("profile")
                 or {}
             )
 
-            required_fields = [
+            updates = {}
+
+            for key in [
                 "height_cm",
                 "weight_kg",
                 "age",
-                "sex",
-                "activity_level",
-                "goal",
-            ]
+            ]:
+                if incoming.get(key) is not None:
+                    updates[key] = incoming.get(key)
 
-            missing = [
-                field
-                for field in required_fields
-                if profile.get(field) is None
-            ]
+            sex = normalize_sex(
+                incoming.get("sex")
+            )
+            if sex:
+                updates["sex"] = sex
 
-            if missing:
+            activity = normalize_activity(
+                incoming.get("activity_level")
+            )
+            if activity:
+                updates["activity_level"] = activity
 
+            goal = normalize_goal(
+                incoming.get("goal")
+            )
+            if goal:
+                updates["goal"] = goal
+
+            profile, completed = save_and_finish_profile(
+                user_id,
+                updates,
+            )
+
+            if not completed:
                 reply_text(
                     event.reply_token,
-                    profile_help(),
+                    missing_profile_text(profile),
                 )
-
                 return
-
-            activity_text = str(
-                profile[
-                    "activity_level"
-                ]
-            )
-
-            # 非常高一定要先判斷
-            # 不然會被「高」先吃掉
-            if "非常高" in activity_text:
-                activity_level = "非常高"
-
-            elif "久坐" in activity_text:
-                activity_level = "久坐"
-
-            elif "輕" in activity_text:
-                activity_level = "輕量"
-
-            elif "中" in activity_text:
-                activity_level = "中等"
-
-            elif "高" in activity_text:
-                activity_level = "高"
-
-            else:
-                activity_level = "輕量"
-
-            profile[
-                "activity_level"
-            ] = activity_level
-
-
-            goal_text = str(
-                profile["goal"]
-            )
-
-            if "減" in goal_text:
-                profile["goal"] = "減脂"
-
-            elif "增" in goal_text:
-                profile["goal"] = "增肌"
-
-            else:
-                profile["goal"] = "維持"
-
-
-            profile = (
-                calculate_targets(
-                    profile
-                )
-            )
-
-            save_profile(
-                user_id,
-                profile,
-            )
 
             reply_text(
                 event.reply_token,
                 (
-                    "👤 個人模式開好了！\n\n"
-
-                    f"🔥 BMR 約 {profile['bmr']} kcal\n"
-                    f"⚡ TDEE 約 {profile['tdee']} kcal\n\n"
-
-                    f"🎯 每日熱量 "
-                    f"{profile['calorie_target']} kcal\n"
-
-                    f"🥩 蛋白質 "
-                    f"{profile['protein_target']} g\n"
-
-                    f"🍚 碳水 "
-                    f"{profile['carbs_target']} g\n"
-
-                    f"🥑 脂肪 "
-                    f"{profile['fat_target']} g\n"
-
-                    f"🥬 纖維 "
-                    f"{profile['fiber_target']} g\n\n"
-
-                    "之後拍每一餐，我都會順便告訴你"
-                    "今天還剩多少額度 😎"
+                    "✅ 個人資料已更新\n\n"
+                    + profile_summary(profile)
+                    + "\n\n之後每餐都會自動算今日進度 😎"
                 ),
             )
-
             return
 
 
@@ -1682,7 +2044,7 @@ def handle_text(event):
 
             reply_text(
                 event.reply_token,
-                answer,
+                compact_ai_text(answer),
             )
 
             return
@@ -1772,7 +2134,7 @@ def handle_image(event):
 
 
         # -------------------------------------------------
-        # V2 速度優化
+        # V3 速度優化
         # -------------------------------------------------
 
         image_bytes, content_type = (
