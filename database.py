@@ -375,6 +375,36 @@ def init_database():
                 """
             )
 
+        # =================================================
+        # V6.0：InBody 歷史
+        # =================================================
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS inbody_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    log_date DATE NOT NULL,
+                    weight_kg DOUBLE PRECISION,
+                    body_fat_pct DOUBLE PRECISION,
+                    body_fat_kg DOUBLE PRECISION,
+                    skeletal_muscle_kg DOUBLE PRECISION,
+                    bmi DOUBLE PRECISION,
+                    visceral_fat_level DOUBLE PRECISION,
+                    bmr DOUBLE PRECISION,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, log_date)
+                );
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_inbody_logs_user_date
+                ON inbody_logs(user_id, log_date);
+                """
+            )
+
         conn.commit()
 
         print(
@@ -3157,3 +3187,76 @@ def get_unfinished_exercise_plans(user_id, days=7):
                 (user_id, normalize_date(taiwan_now().date()-timedelta(days=days))))
             return cursor.fetchall()
     finally: conn.close()
+
+
+# =========================================================
+# V6.0：圖表 / 趨勢 / InBody
+# =========================================================
+
+def get_meal_range(user_id, start_date, end_date):
+    start_date = normalize_date(start_date)
+    end_date = normalize_date(end_date)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """SELECT meal_date,
+                          COALESCE(SUM(calories),0) calories,
+                          COALESCE(SUM(protein),0) protein,
+                          COALESCE(SUM(carbs),0) carbs,
+                          COALESCE(SUM(fat),0) fat,
+                          COALESCE(SUM(fiber),0) fiber,
+                          COALESCE(SUM(sodium),0) sodium,
+                          COUNT(*) meal_count
+                   FROM meals
+                   WHERE user_id=%s AND meal_date BETWEEN %s AND %s
+                   GROUP BY meal_date ORDER BY meal_date ASC""",
+                (user_id,start_date,end_date)
+            )
+            return cursor.fetchall()
+    finally:
+        conn.close()
+
+def save_inbody(user_id, data, log_date=None):
+    log_date = normalize_date(log_date)
+    fields = ["weight_kg","body_fat_pct","body_fat_kg","skeletal_muscle_kg",
+              "bmi","visceral_fat_level","bmr"]
+    vals = [data.get(k) for k in fields]
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO inbody_logs
+                   (user_id,log_date,weight_kg,body_fat_pct,body_fat_kg,skeletal_muscle_kg,bmi,visceral_fat_level,bmr)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT(user_id,log_date) DO UPDATE SET
+                     weight_kg=COALESCE(EXCLUDED.weight_kg,inbody_logs.weight_kg),
+                     body_fat_pct=COALESCE(EXCLUDED.body_fat_pct,inbody_logs.body_fat_pct),
+                     body_fat_kg=COALESCE(EXCLUDED.body_fat_kg,inbody_logs.body_fat_kg),
+                     skeletal_muscle_kg=COALESCE(EXCLUDED.skeletal_muscle_kg,inbody_logs.skeletal_muscle_kg),
+                     bmi=COALESCE(EXCLUDED.bmi,inbody_logs.bmi),
+                     visceral_fat_level=COALESCE(EXCLUDED.visceral_fat_level,inbody_logs.visceral_fat_level),
+                     bmr=COALESCE(EXCLUDED.bmr,inbody_logs.bmr),
+                     updated_at=NOW()
+                   RETURNING *""",
+                (user_id,log_date,*vals)
+            )
+            row=cursor.fetchone()
+        conn.commit()
+        if data.get("weight_kg") is not None:
+            save_weight(user_id, data["weight_kg"], log_date)
+        return row
+    finally:
+        conn.close()
+
+def get_inbody_logs(user_id, limit=30):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM inbody_logs WHERE user_id=%s ORDER BY log_date DESC LIMIT %s",
+                (user_id,limit)
+            )
+            return cursor.fetchall()
+    finally:
+        conn.close()
