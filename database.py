@@ -42,7 +42,6 @@ def init_database():
 
             # -------------------------------------------------
             # 餐點紀錄
-            # 保留 V1 原本的結構
             # -------------------------------------------------
 
             cursor.execute(
@@ -98,7 +97,10 @@ def init_database():
 
 
             # -------------------------------------------------
-            # V2：個人資料
+            # V3：個人資料
+            #
+            # 所有欄位都允許暫時為 NULL
+            # 所以使用者可以分次填資料
             # -------------------------------------------------
 
             cursor.execute(
@@ -145,7 +147,7 @@ def init_database():
 
 
             # -------------------------------------------------
-            # V2：食物記憶
+            # 食物記憶
             # -------------------------------------------------
 
             cursor.execute(
@@ -189,7 +191,7 @@ def init_database():
         conn.commit()
 
         print(
-            "DATABASE_V2_READY",
+            "DATABASE_V3_READY",
             flush=True
         )
 
@@ -735,199 +737,33 @@ def get_today_totals(user_id):
 
 
 # =========================================================
-# V2：儲存 / 更新個人資料
+# V3：個人資料欄位
 # =========================================================
 
-def save_profile(
-    user_id,
-    profile
-):
+PROFILE_FIELDS = {
 
-    conn = get_connection()
+    "height_cm",
+    "weight_kg",
+    "age",
+    "sex",
+    "activity_level",
+    "goal",
 
-    try:
+    "bmr",
+    "tdee",
 
-        with conn.cursor() as cursor:
+    "calorie_target",
+    "protein_target",
+    "carbs_target",
+    "fat_target",
+    "fiber_target",
 
-            cursor.execute(
-                """
-                INSERT INTO user_profiles (
-
-                    user_id,
-
-                    height_cm,
-                    weight_kg,
-                    age,
-                    sex,
-
-                    activity_level,
-                    goal,
-
-                    bmr,
-                    tdee,
-
-                    calorie_target,
-                    protein_target,
-                    carbs_target,
-                    fat_target,
-                    fiber_target,
-
-                    inbody,
-
-                    updated_at
-                )
-
-                VALUES (
-
-                    %s,
-
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-
-                    %s,
-                    %s,
-
-                    %s,
-                    %s,
-
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-
-                    %s::jsonb,
-
-                    NOW()
-                )
-
-                ON CONFLICT (user_id)
-
-                DO UPDATE SET
-
-                    height_cm =
-                        EXCLUDED.height_cm,
-
-                    weight_kg =
-                        EXCLUDED.weight_kg,
-
-                    age =
-                        EXCLUDED.age,
-
-                    sex =
-                        EXCLUDED.sex,
-
-                    activity_level =
-                        EXCLUDED.activity_level,
-
-                    goal =
-                        EXCLUDED.goal,
-
-                    bmr =
-                        EXCLUDED.bmr,
-
-                    tdee =
-                        EXCLUDED.tdee,
-
-                    calorie_target =
-                        EXCLUDED.calorie_target,
-
-                    protein_target =
-                        EXCLUDED.protein_target,
-
-                    carbs_target =
-                        EXCLUDED.carbs_target,
-
-                    fat_target =
-                        EXCLUDED.fat_target,
-
-                    fiber_target =
-                        EXCLUDED.fiber_target,
-
-                    inbody =
-                        EXCLUDED.inbody,
-
-                    updated_at =
-                        NOW();
-                """,
-
-                (
-                    user_id,
-
-                    profile.get(
-                        "height_cm"
-                    ),
-
-                    profile.get(
-                        "weight_kg"
-                    ),
-
-                    profile.get(
-                        "age"
-                    ),
-
-                    profile.get(
-                        "sex"
-                    ),
-
-                    profile.get(
-                        "activity_level"
-                    ),
-
-                    profile.get(
-                        "goal"
-                    ),
-
-                    profile.get(
-                        "bmr"
-                    ),
-
-                    profile.get(
-                        "tdee"
-                    ),
-
-                    profile.get(
-                        "calorie_target"
-                    ),
-
-                    profile.get(
-                        "protein_target"
-                    ),
-
-                    profile.get(
-                        "carbs_target"
-                    ),
-
-                    profile.get(
-                        "fat_target"
-                    ),
-
-                    profile.get(
-                        "fiber_target",
-                        25
-                    ),
-
-                    json.dumps(
-                        profile.get(
-                            "inbody",
-                            {}
-                        ),
-                        ensure_ascii=False
-                    )
-                )
-            )
-
-        conn.commit()
-
-    finally:
-
-        conn.close()
+    "inbody",
+}
 
 
 # =========================================================
-# V2：取得個人資料
+# V3：取得個人資料
 # =========================================================
 
 def get_profile(user_id):
@@ -958,7 +794,288 @@ def get_profile(user_id):
 
 
 # =========================================================
-# V2：新增食物記憶
+# V3：部分更新個人資料
+#
+# 核心差異：
+#
+# 使用者只傳「女」
+# → 只更新 sex
+#
+# 使用者只傳「我現在58公斤」
+# → 只更新 weight_kg
+#
+# 其他舊資料不會被清空
+# =========================================================
+
+def update_profile_fields(
+    user_id,
+    updates
+):
+
+    if not updates:
+
+        return get_profile(
+            user_id
+        )
+
+    clean_updates = {}
+
+    for key, value in updates.items():
+
+        if (
+            key in PROFILE_FIELDS
+            and value is not None
+        ):
+
+            clean_updates[key] = value
+
+    if not clean_updates:
+
+        return get_profile(
+            user_id
+        )
+
+
+    # -----------------------------------------------------
+    # 如果還沒有這個使用者
+    # 先建立一筆空白 profile
+    # -----------------------------------------------------
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                INSERT INTO user_profiles (
+                    user_id
+                )
+
+                VALUES (%s)
+
+                ON CONFLICT (user_id)
+                DO NOTHING;
+                """,
+                (
+                    user_id,
+                )
+            )
+
+        conn.commit()
+
+    finally:
+
+        conn.close()
+
+
+    # -----------------------------------------------------
+    # 動態更新「這次真的有傳的欄位」
+    # -----------------------------------------------------
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            set_parts = []
+            values = []
+
+            for key, value in clean_updates.items():
+
+                if key == "inbody":
+
+                    set_parts.append(
+                        "inbody = %s::jsonb"
+                    )
+
+                    values.append(
+                        json.dumps(
+                            value or {},
+                            ensure_ascii=False
+                        )
+                    )
+
+                else:
+
+                    set_parts.append(
+                        f"{key} = %s"
+                    )
+
+                    values.append(
+                        value
+                    )
+
+            set_parts.append(
+                "updated_at = NOW()"
+            )
+
+            values.append(
+                user_id
+            )
+
+            sql = (
+                "UPDATE user_profiles "
+                "SET "
+                + ", ".join(set_parts)
+                + " WHERE user_id = %s "
+                + "RETURNING *;"
+            )
+
+            cursor.execute(
+                sql,
+                tuple(values)
+            )
+
+            result = cursor.fetchone()
+
+        conn.commit()
+
+        return result
+
+    finally:
+
+        conn.close()
+
+
+# =========================================================
+# V3：save_profile
+#
+# 保留原本函式名稱，
+# 所以 app.py 舊功能不會因為改 database.py 就壞掉。
+#
+# 但現在改成「部分更新」。
+# =========================================================
+
+def save_profile(
+    user_id,
+    profile
+):
+
+    return update_profile_fields(
+        user_id,
+        profile
+    )
+
+
+# =========================================================
+# V3：取得尚未填寫的必要資料
+# =========================================================
+
+def get_missing_profile_fields(
+    user_id
+):
+
+    profile = get_profile(
+        user_id
+    )
+
+    required_fields = [
+        "height_cm",
+        "weight_kg",
+        "age",
+        "sex",
+        "activity_level",
+        "goal",
+    ]
+
+    if not profile:
+
+        return required_fields
+
+    missing = []
+
+    for field in required_fields:
+
+        value = profile.get(
+            field
+        )
+
+        if value is None or value == "":
+
+            missing.append(
+                field
+            )
+
+    return missing
+
+
+# =========================================================
+# V3：個人資料是否完整
+# =========================================================
+
+def is_profile_complete(
+    user_id
+):
+
+    return (
+        len(
+            get_missing_profile_fields(
+                user_id
+            )
+        )
+        == 0
+    )
+
+
+# =========================================================
+# V3：清除計算結果
+#
+# 當身高 / 體重 / 年齡 / 性別 /
+# 活動量 / 目標改變時，
+# app.py 可以先清掉舊 BMR/TDEE，
+# 再重新計算。
+# =========================================================
+
+def clear_profile_targets(
+    user_id
+):
+
+    conn = get_connection()
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                UPDATE user_profiles
+
+                SET
+                    bmr = NULL,
+                    tdee = NULL,
+
+                    calorie_target = NULL,
+                    protein_target = NULL,
+                    carbs_target = NULL,
+                    fat_target = NULL,
+
+                    updated_at = NOW()
+
+                WHERE user_id = %s
+
+                RETURNING *;
+                """,
+                (
+                    user_id,
+                )
+            )
+
+            result = cursor.fetchone()
+
+        conn.commit()
+
+        return result
+
+    finally:
+
+        conn.close()
+
+
+# =========================================================
+# 新增食物記憶
 # =========================================================
 
 def add_food_memory(
@@ -1020,7 +1137,7 @@ def add_food_memory(
 
 
 # =========================================================
-# V2：取得使用者食物記憶
+# 取得使用者食物記憶
 # =========================================================
 
 def get_food_memories(
