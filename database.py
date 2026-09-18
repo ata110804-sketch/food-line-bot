@@ -278,10 +278,52 @@ def init_database():
                 """
             )
 
+        # =================================================
+        # V5.2：飲水紀錄＋每日互動狀態
+        # =================================================
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS water_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    log_date DATE NOT NULL,
+                    amount_ml DOUBLE PRECISION NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_water_logs_user_date
+                ON water_logs(user_id, log_date);
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS water_targets (
+                    user_id TEXT PRIMARY KEY,
+                    target_ml DOUBLE PRECISION NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_interaction_state (
+                    user_id TEXT NOT NULL,
+                    state_date DATE NOT NULL,
+                    yesterday_summary_shown BOOLEAN DEFAULT FALSE,
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (user_id, state_date)
+                );
+                """
+            )
+
         conn.commit()
 
         print(
-            "DATABASE_V4_READY",
+            "DATABASE_V5_2_READY",
             flush=True
         )
 
@@ -2481,3 +2523,292 @@ def get_food_memories(
 
     finally:
         conn.close()
+
+# =========================================================
+# V5.2：飲水系統
+# =========================================================
+
+def get_default_water_target(user_id):
+    profile = get_profile(user_id) or {}
+    weight = profile.get("weight_kg")
+    if weight is None:
+        return 2000
+    try:
+        weight = float(weight)
+    except Exception:
+        return 2000
+
+    target = round(weight * 30 / 50) * 50
+    return int(max(1500, min(target, 3500)))
+
+
+def get_water_target(user_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT target_ml FROM water_targets WHERE user_id = %s;",
+                (user_id,)
+            )
+            row = cursor.fetchone()
+
+        if row and row.get("target_ml") is not None:
+            return int(round(float(row["target_ml"])))
+        return get_default_water_target(user_id)
+    finally:
+        conn.close()
+
+
+def set_water_target(user_id, target_ml):
+    target_ml = float(target_ml)
+    if target_ml < 500 or target_ml > 6000:
+        raise ValueError("飲水目標請設定在 500～6000 mL 之間。")
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO water_targets (user_id, target_ml)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id)
+                DO UPDATE SET
+                    target_ml = EXCLUDED.target_ml,
+                    updated_at = NOW()
+                RETURNING *;
+                """,
+                (user_id, target_ml)
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+def reset_water_target(user_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM water_targets WHERE user_id = %s RETURNING user_id;",
+                (user_id,)
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        return bool(result)
+    finally:
+        conn.close()
+
+
+def add_water(user_id, amount_ml, log_date=None):
+    target_date = normalize_date(log_date)
+    amount_ml = float(amount_ml)
+    if amount_ml <= 0 or amount_ml > 5000:
+        raise ValueError("單次飲水量請輸入 1～5000 mL。")
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO water_logs (user_id, log_date, amount_ml)
+                VALUES (%s, %s, %s)
+                RETURNING *;
+                """,
+                (user_id, target_date, amount_ml)
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+def get_water_total(user_id, target_date=None):
+    target_date = normalize_date(target_date)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS log_count,
+                       COALESCE(SUM(amount_ml), 0) AS total_ml
+                FROM water_logs
+                WHERE user_id = %s AND log_date = %s;
+                """,
+                (user_id, target_date)
+            )
+            row = cursor.fetchone() or {}
+    finally:
+        conn.close()
+
+    total_ml = float(row.get("total_ml") or 0)
+    target_ml = float(get_water_target(user_id))
+    return {
+        "date": target_date,
+        "log_count": int(row.get("log_count") or 0),
+        "total_ml": round(total_ml),
+        "target_ml": round(target_ml),
+        "remaining_ml": round(max(target_ml - total_ml, 0)),
+        "percent": round((total_ml / target_ml * 100) if target_ml else 0, 1),
+        "reached": total_ml >= target_ml,
+    }
+
+
+def get_today_water(user_id):
+    return get_water_total(user_id, taiwan_today())
+
+
+def delete_last_water(user_id, target_date=None):
+    target_date = normalize_date(target_date)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM water_logs
+                WHERE id = (
+                    SELECT id FROM water_logs
+                    WHERE user_id = %s AND log_date = %s
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                )
+                RETURNING *;
+                """,
+                (user_id, target_date)
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+def reset_water_day(user_id, target_date=None):
+    target_date = normalize_date(target_date)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM water_logs
+                WHERE user_id = %s AND log_date = %s
+                RETURNING id;
+                """,
+                (user_id, target_date)
+            )
+            deleted = cursor.fetchall()
+        conn.commit()
+        return len(deleted)
+    finally:
+        conn.close()
+
+
+def get_month_water_daily_totals(user_id, year=None, month=None):
+    now = taiwan_now()
+    year = int(year or now.year)
+    month = int(month or now.month)
+    start_date = date(year, month, 1)
+    end_date = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT log_date, COALESCE(SUM(amount_ml), 0) AS total_ml
+                FROM water_logs
+                WHERE user_id = %s
+                  AND log_date >= %s
+                  AND log_date < %s
+                GROUP BY log_date
+                ORDER BY log_date ASC;
+                """,
+                (user_id, start_date, end_date)
+            )
+            return cursor.fetchall()
+    finally:
+        conn.close()
+
+
+def get_month_water_summary(user_id, year=None, month=None):
+    rows = get_month_water_daily_totals(user_id, year, month)
+    target_ml = float(get_water_target(user_id))
+    if not rows:
+        return {
+            "recorded_days": 0, "avg_ml": 0, "total_ml": 0,
+            "target_ml": round(target_ml), "reached_days": 0,
+            "reached_rate": 0, "days": []
+        }
+
+    totals = [float(row.get("total_ml") or 0) for row in rows]
+    reached_days = sum(1 for value in totals if value >= target_ml)
+    return {
+        "recorded_days": len(rows),
+        "avg_ml": round(sum(totals) / len(totals)),
+        "total_ml": round(sum(totals)),
+        "target_ml": round(target_ml),
+        "reached_days": reached_days,
+        "reached_rate": round(reached_days / len(rows) * 100, 1),
+        "days": rows,
+    }
+
+
+# =========================================================
+# V5.2：昨日摘要每天只主動顯示一次
+# =========================================================
+
+def should_show_yesterday_summary(user_id):
+    today = taiwan_today()
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT yesterday_summary_shown
+                FROM daily_interaction_state
+                WHERE user_id = %s AND state_date = %s;
+                """,
+                (user_id, today)
+            )
+            row = cursor.fetchone()
+        return not bool(row and row.get("yesterday_summary_shown"))
+    finally:
+        conn.close()
+
+
+def mark_yesterday_summary_shown(user_id):
+    today = taiwan_today()
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO daily_interaction_state
+                    (user_id, state_date, yesterday_summary_shown, updated_at)
+                VALUES (%s, %s, TRUE, NOW())
+                ON CONFLICT (user_id, state_date)
+                DO UPDATE SET
+                    yesterday_summary_shown = TRUE,
+                    updated_at = NOW()
+                RETURNING *;
+                """,
+                (user_id, today)
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+def get_yesterday_snapshot(user_id):
+    yesterday = taiwan_today() - timedelta(days=1)
+    return {
+        "date": yesterday,
+        "totals": get_totals_by_date(user_id, yesterday) or {},
+        "meals": get_meals_by_date(user_id, yesterday) or [],
+        "targets": get_effective_targets(user_id, yesterday) or {},
+        "water": get_water_total(user_id, yesterday),
+    }
