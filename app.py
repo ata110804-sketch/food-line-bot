@@ -117,7 +117,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V5.4 is running!"
+    return "LINE Food AI Bot V5.5 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -1567,7 +1567,60 @@ def handle_text(event):
             return
 
         # -------------------------------------------------
+        # V5.5 核心文字路由：規則優先於閒聊與 AI
+        # -------------------------------------------------
+        # 1) 喝水查詢先攔截，避免「我今天喝了多少水」被當成飲食或喝水新增。
+        water_query_compact = re.sub(r"\s+", "", text)
+        if (
+            ("水" in water_query_compact or "喝" in water_query_compact)
+            and any(k in water_query_compact for k in ["多少", "幾ml", "幾ML", "幾毫升", "進度", "喝水紀錄", "飲水紀錄"])
+            and not re.search(r"\d+(?:\.\d+)?\s*(?:ml|mL|ML|毫升|cc|CC)", text)
+        ):
+            reply_text(event.reply_token, water_status_reply(user_id))
+            return
+
+        # 2) 明確『已經吃了什麼』直接規則拆餐，不再交給 AI 猜 intent。
+        #    支援：早餐兩顆蛋／我早餐吃兩顆蛋／早餐...午餐...晚餐...／剛剛吃了香蕉。
+        rule_meals = parse_meal_log_by_rules(text)
+        if rule_meals:
+            # 昨日補登目前不可偷寫成今天；保留安全擋板。
+            if "昨天" in text or "昨日" in text:
+                reply_text(
+                    event.reply_token,
+                    "📅 我知道你是在補昨天的飲食，但目前這版先不把它誤寫進今天。"
+                )
+                return
+
+            start_loading(user_id, 60)
+            saved = []
+            for meal in rule_meals[:4]:
+                meal_type = meal.get("meal_type") or "點心"
+                meal_text = str(meal.get("text") or "").strip()
+                if not meal_text:
+                    continue
+                food_data = analyze_food_text(meal_text, meal_type)
+                food_data["meal_type"] = meal_type
+                save_meal(user_id, food_data, meal_type=meal_type)
+                saved.append((meal_type, food_data))
+
+            if saved:
+                totals = totals_to_dict(get_today_totals(user_id))
+                lines = [f"✅ 已記錄 {len(saved)} 餐"]
+                for meal_type, data in saved:
+                    total = data.get("total") or {}
+                    name = data.get("meal_name") or meal_text
+                    lines.append(f"・{meal_type}｜{name}　🔥 {round(number(total.get('calories')))} kcal")
+                lines.extend([
+                    "──────────",
+                    f"📊 今日累計｜🔥 {round(totals['calories'])} kcal",
+                    f"🥩 {round(totals['protein'], 1)}g｜🍚 {round(totals['carbs'], 1)}g｜🥑 {round(totals['fat'], 1)}g",
+                ])
+                reply_text(event.reply_token, "\n".join(lines))
+                return
+
+        # -------------------------------------------------
         # 日常互動：嗨／早安／晚安／謝謝
+        # 注意：一定放在飲食規則後面，否則「早餐／早上」會被早安邏輯攔走。
         # -------------------------------------------------
 
         casual = social_reply(text)
