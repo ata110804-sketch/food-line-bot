@@ -291,6 +291,53 @@ def looks_like_explicit_meal_log(text):
     return bool(re.search(r"(早餐|早上|午餐|中午|晚餐|晚上|點心|宵夜).{0,6}(吃|喝)", t))
 
 
+def parse_meal_log_by_rules(text):
+    """規則式拆餐：明確陳述吃過什麼時，不花 intent token，直接拆成 meal_log。"""
+    original = str(text or "").strip()
+    t = re.sub(r"\s+", " ", original)
+    compact = re.sub(r"\s+", "", original)
+
+    # 問句 / 求建議不要誤記成已吃。
+    advice_words = ["吃什麼", "喝什麼", "推薦", "建議", "可以吃", "能吃", "可不可以", "好嗎", "嗎？", "嗎?", "怎麼吃", "該吃", "要吃什麼"]
+    if any(w in compact for w in advice_words):
+        return []
+
+    aliases = {
+        "早餐": "早餐", "早上": "早餐",
+        "午餐": "午餐", "中午": "午餐",
+        "晚餐": "晚餐", "晚上": "晚餐",
+        "點心": "點心", "宵夜": "宵夜",
+    }
+    pattern = re.compile(r"早餐|早上|午餐|中午|晚餐|晚上|點心|宵夜")
+    matches = list(pattern.finditer(t))
+    meals = []
+
+    # 有明確餐別：支援「早餐兩顆蛋 午餐健康餐 晚餐漢堡」以及「我早餐吃兩顆蛋」。
+    if matches:
+        for i, m in enumerate(matches):
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(t)
+            body = t[start:end].strip(" ，,、。；;：:")
+            body = re.sub(r"^(有|是|吃了|吃|喝了|喝|我吃了|我吃|我喝了|我喝)", "", body).strip(" ，,、。；;：:")
+            body = re.sub(r"(幫我)?(記錄|紀錄|記一下|記起來)$", "", body).strip(" ，,、。；;：:")
+            if body:
+                meals.append({"meal_type": aliases[m.group()], "text": body})
+        if meals:
+            return meals[:4]
+
+    # 沒寫餐別，但明確說已經吃/喝：交給時間判餐別，至少能記「剛剛吃了一根香蕉」。
+    eaten = re.search(r"(?:我)?(?:剛剛|剛才|剛|今天)?(?:又)?(?:吃了|喝了|吃|喝)(.+)", t)
+    if eaten:
+        body = eaten.group(1).strip(" ，,、。；;：:")
+        body = re.sub(r"(幫我)?(記錄|紀錄|記一下|記起來)$", "", body).strip(" ，,、。；;：:")
+        if body:
+            hour = datetime.now(TAIWAN_TZ).hour
+            meal_type = "早餐" if hour < 10 else "午餐" if hour < 14 else "點心" if hour < 17 else "晚餐" if hour < 22 else "宵夜"
+            return [{"meal_type": meal_type, "text": body}]
+
+    return []
+
+
 def advice_request_for_line(user_text, intent):
     """把 AI 輸出限制成適合 LINE 手機閱讀的短條列。"""
     if intent == "exercise_advice":
@@ -1892,10 +1939,17 @@ def handle_text(event):
         # 其餘交給 V4 AI 路由
         # -------------------------------------------------
 
-        intent_data = classify_user_text(text)
-        intent = intent_data.get("intent")
+        # V5.4.4：飲食陳述「規則優先、AI 第二」。
+        # 例如：早餐兩顆茶葉蛋 午餐健康餐 晚餐漢堡，直接拆餐，不再讓 intent AI 猜。
+        rule_meals = parse_meal_log_by_rules(text)
+        if rule_meals:
+            intent_data = {"intent": "meal_log", "meals": rule_meals, "target_date": "今天"}
+            intent = "meal_log"
+        else:
+            intent_data = classify_user_text(text)
+            intent = intent_data.get("intent")
 
-        # V5.4.2：明確的「早餐吃…午餐吃…晚餐吃…」是記錄，不是查詢。
+        # 舊 AI 路由的第二層保護；規則沒抓到時才可能走到這裡。
         # AI 偶爾會把整天飲食陳述誤判成 today，這裡用 deterministic rule 校正。
         if looks_like_explicit_meal_log(text) and intent != "meal_log":
             retry = classify_user_text(
