@@ -3260,3 +3260,208 @@ def get_inbody_logs(user_id, limit=30):
             return cursor.fetchall()
     finally:
         conn.close()
+
+# =========================================================
+# V6.1: Neon history / food catalog / pending meal helpers
+# =========================================================
+
+def save_weight_history(user_id, weight_kg, log_date=None, note=None, sync_current=True):
+    target_date = normalize_date(log_date)
+    weight_kg = float(weight_kg)
+    if not 20 <= weight_kg <= 400:
+        raise ValueError("體重數值不合理。")
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""INSERT INTO weight_logs(user_id,log_date,weight_kg,note)
+                VALUES(%s,%s,%s,%s) ON CONFLICT(user_id,log_date) DO UPDATE
+                SET weight_kg=EXCLUDED.weight_kg,note=EXCLUDED.note RETURNING *""",
+                (user_id,target_date,weight_kg,note))
+            row = cursor.fetchone()
+            if sync_current:
+                cursor.execute("SELECT log_date,weight_kg FROM weight_logs WHERE user_id=%s ORDER BY log_date DESC,id DESC LIMIT 1",(user_id,))
+                latest = cursor.fetchone()
+                if latest and latest['log_date'] == target_date:
+                    cursor.execute("INSERT INTO user_profiles(user_id,weight_kg,updated_at) VALUES(%s,%s,NOW()) ON CONFLICT(user_id) DO UPDATE SET weight_kg=EXCLUDED.weight_kg,updated_at=NOW()",(user_id,latest['weight_kg']))
+        conn.commit(); return row
+    finally: conn.close()
+
+def delete_weight_history(user_id, log_date):
+    target_date=normalize_date(log_date); conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM weight_logs WHERE user_id=%s AND log_date=%s RETURNING *",(user_id,target_date)); row=cursor.fetchone()
+            cursor.execute("SELECT weight_kg FROM weight_logs WHERE user_id=%s ORDER BY log_date DESC,id DESC LIMIT 1",(user_id,)); latest=cursor.fetchone()
+            if latest: cursor.execute("UPDATE user_profiles SET weight_kg=%s,updated_at=NOW() WHERE user_id=%s",(latest['weight_kg'],user_id))
+        conn.commit(); return row
+    finally: conn.close()
+
+def get_weight_history(user_id, start_date=None, end_date=None, limit=180):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            if start_date or end_date:
+                start=normalize_date(start_date) if start_date else date(2000,1,1); end=normalize_date(end_date) if end_date else taiwan_today()
+                cursor.execute("SELECT * FROM weight_logs WHERE user_id=%s AND log_date BETWEEN %s AND %s ORDER BY log_date ASC,id ASC",(user_id,start,end))
+            else:
+                cursor.execute("SELECT * FROM weight_logs WHERE user_id=%s ORDER BY log_date DESC,id DESC LIMIT %s",(user_id,limit))
+            return cursor.fetchall()
+    finally: conn.close()
+
+def save_water_history(user_id, amount_ml, log_date=None, beverage_type='water', note=None):
+    target_date=normalize_date(log_date); amount_ml=float(amount_ml)
+    if not 0 < amount_ml <= 10000: raise ValueError('飲水量數值不合理。')
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("INSERT INTO water_logs(user_id,log_date,amount_ml,beverage_type,note) VALUES(%s,%s,%s,%s,%s) RETURNING *",(user_id,target_date,amount_ml,beverage_type,note)); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def get_water_history(user_id, log_date=None):
+    target_date=normalize_date(log_date); conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM water_logs WHERE user_id=%s AND log_date=%s ORDER BY created_at,id",(user_id,target_date)); return cursor.fetchall()
+    finally: conn.close()
+
+def delete_water_entry(user_id, entry_id):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM water_logs WHERE id=%s AND user_id=%s RETURNING *",(entry_id,user_id)); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def get_water_range(user_id,start_date,end_date):
+    start=normalize_date(start_date); end=normalize_date(end_date); conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT log_date,COALESCE(SUM(amount_ml),0) total_ml,COUNT(*) entry_count FROM water_logs WHERE user_id=%s AND log_date BETWEEN %s AND %s GROUP BY log_date ORDER BY log_date",(user_id,start,end)); return cursor.fetchall()
+    finally: conn.close()
+
+def create_pending_meal(user_id, foods, meal_type=None, meal_date=None, source_images=None, duplicate_keys=None):
+    target_date=normalize_date(meal_date); foods=foods or []
+    total=lambda k: sum(float(x.get(k) or 0) for x in foods)
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE pending_meals SET status='cancelled',updated_at=NOW() WHERE user_id=%s AND status='pending' AND created_at < NOW()-INTERVAL '2 hours'",(user_id,))
+            cursor.execute("""INSERT INTO pending_meals(user_id,meal_date,meal_type,foods,source_images,calories,protein,carbs,fat,fiber,sugar,sodium,duplicate_keys)
+                VALUES(%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+                (user_id,target_date,meal_type,json.dumps(foods,ensure_ascii=False),json.dumps(source_images or [],ensure_ascii=False),total('calories'),total('protein'),total('carbs'),total('fat'),total('fiber'),total('sugar'),total('sodium'),duplicate_keys or [])); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def get_pending_meal(user_id, pending_id=None):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            if pending_id: cursor.execute("SELECT * FROM pending_meals WHERE id=%s AND user_id=%s AND status='pending'",(pending_id,user_id))
+            else: cursor.execute("SELECT * FROM pending_meals WHERE user_id=%s AND status='pending' ORDER BY created_at DESC LIMIT 1",(user_id,))
+            return cursor.fetchone()
+    finally: conn.close()
+
+def update_pending_meal(user_id,pending_id,foods,source_images=None,duplicate_keys=None):
+    foods=foods or []; total=lambda k: sum(float(x.get(k) or 0) for x in foods)
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""UPDATE pending_meals SET foods=%s::jsonb,source_images=COALESCE(%s::jsonb,source_images),calories=%s,protein=%s,carbs=%s,fat=%s,fiber=%s,sugar=%s,sodium=%s,duplicate_keys=%s,updated_at=NOW() WHERE id=%s AND user_id=%s AND status='pending' RETURNING *""",
+            (json.dumps(foods,ensure_ascii=False),json.dumps(source_images,ensure_ascii=False) if source_images is not None else None,total('calories'),total('protein'),total('carbs'),total('fat'),total('fiber'),total('sugar'),total('sodium'),duplicate_keys or [],pending_id,user_id)); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def cancel_pending_meal(user_id,pending_id):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE pending_meals SET status='cancelled',updated_at=NOW() WHERE id=%s AND user_id=%s AND status='pending' RETURNING *",(pending_id,user_id)); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def confirm_pending_meal(user_id,pending_id):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM pending_meals WHERE id=%s AND user_id=%s AND status='pending' FOR UPDATE",(pending_id,user_id)); p=cursor.fetchone()
+            if not p: return None
+            for food in (p.get('foods') or []):
+                cursor.execute("""INSERT INTO meals(user_id,meal_type,meal_date,food_name,calories,protein,carbs,fat,fiber,sodium,sugar,source_type,source_ref,pending_meal_id)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (user_id,p.get('meal_type') or '其他',p['meal_date'],food.get('food_name') or food.get('name') or '未命名食物',float(food.get('calories') or 0),float(food.get('protein') or 0),float(food.get('carbs') or 0),float(food.get('fat') or 0),float(food.get('fiber') or 0),float(food.get('sodium') or 0),float(food.get('sugar') or 0),food.get('source_type') or 'ai',str(food.get('source_ref') or ''),pending_id))
+            cursor.execute("UPDATE pending_meals SET status='confirmed',updated_at=NOW() WHERE id=%s RETURNING *",(pending_id,)); row=cursor.fetchone()
+        conn.commit(); return row
+    except: conn.rollback(); raise
+    finally: conn.close()
+
+def get_active_meals_by_date(user_id,target_date=None,meal_type=None):
+    target_date=normalize_date(target_date); conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            if meal_type: cursor.execute("SELECT * FROM meals WHERE user_id=%s AND meal_date=%s AND meal_type=%s AND deleted_at IS NULL ORDER BY created_at,id",(user_id,target_date,meal_type))
+            else: cursor.execute("SELECT * FROM meals WHERE user_id=%s AND meal_date=%s AND deleted_at IS NULL ORDER BY created_at,id",(user_id,target_date))
+            return cursor.fetchall()
+    finally: conn.close()
+
+def soft_delete_meal(user_id,meal_id):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE meals SET deleted_at=NOW() WHERE id=%s AND user_id=%s AND deleted_at IS NULL RETURNING *",(meal_id,user_id)); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def soft_delete_meal_group(user_id,target_date,meal_type):
+    target_date=normalize_date(target_date); conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE meals SET deleted_at=NOW() WHERE user_id=%s AND meal_date=%s AND meal_type=%s AND deleted_at IS NULL RETURNING id",(user_id,target_date,meal_type)); rows=cursor.fetchall()
+        conn.commit(); return len(rows)
+    finally: conn.close()
+
+def restore_meal(user_id,meal_id):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE meals SET deleted_at=NULL WHERE id=%s AND user_id=%s RETURNING *",(meal_id,user_id)); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def search_food_catalog(query,brand=None,limit=12):
+    q=str(query or '').strip(); conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql="""SELECT * FROM food_catalog WHERE active=TRUE AND (LOWER(product_name) LIKE LOWER(%s) OR EXISTS(SELECT 1 FROM unnest(aliases) a WHERE LOWER(a) LIKE LOWER(%s)))"""; params=[f'%{q}%',f'%{q}%']
+            if brand: sql+=' AND LOWER(brand)=LOWER(%s)'; params.append(brand)
+            sql+=' ORDER BY verified DESC,product_name ASC LIMIT %s'; params.append(limit)
+            cursor.execute(sql,tuple(params)); return cursor.fetchall()
+    finally: conn.close()
+
+def upsert_food_catalog(item):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""INSERT INTO food_catalog(brand,category,product_name,aliases,serving_description,serving_grams,calories,protein,carbs,fat,saturated_fat,sugar,fiber,sodium,source_type,source_name,source_url,verified,data_date)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(brand,product_name,serving_description) DO UPDATE SET aliases=EXCLUDED.aliases,serving_grams=EXCLUDED.serving_grams,calories=EXCLUDED.calories,protein=EXCLUDED.protein,carbs=EXCLUDED.carbs,fat=EXCLUDED.fat,saturated_fat=EXCLUDED.saturated_fat,sugar=EXCLUDED.sugar,fiber=EXCLUDED.fiber,sodium=EXCLUDED.sodium,source_type=EXCLUDED.source_type,source_name=EXCLUDED.source_name,source_url=EXCLUDED.source_url,verified=EXCLUDED.verified,data_date=EXCLUDED.data_date,updated_at=NOW() RETURNING *""",
+            (item.get('brand'),item.get('category') or '一般食品',item['product_name'],item.get('aliases') or [],item.get('serving_description'),item.get('serving_grams'),item.get('calories'),item.get('protein'),item.get('carbs'),item.get('fat'),item.get('saturated_fat'),item.get('sugar'),item.get('fiber'),item.get('sodium'),item.get('source_type') or 'curated',item.get('source_name'),item.get('source_url'),bool(item.get('verified')),item.get('data_date'))); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def save_body_measurement(user_id,log_date=None,**values):
+    target_date=normalize_date(log_date); conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""INSERT INTO body_measurement_logs(user_id,log_date,waist_cm,hip_cm,chest_cm,thigh_cm,arm_cm,note) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(user_id,log_date) DO UPDATE SET waist_cm=COALESCE(EXCLUDED.waist_cm,body_measurement_logs.waist_cm),hip_cm=COALESCE(EXCLUDED.hip_cm,body_measurement_logs.hip_cm),chest_cm=COALESCE(EXCLUDED.chest_cm,body_measurement_logs.chest_cm),thigh_cm=COALESCE(EXCLUDED.thigh_cm,body_measurement_logs.thigh_cm),arm_cm=COALESCE(EXCLUDED.arm_cm,body_measurement_logs.arm_cm),note=COALESCE(EXCLUDED.note,body_measurement_logs.note),updated_at=NOW() RETURNING *""",
+            (user_id,target_date,values.get('waist_cm'),values.get('hip_cm'),values.get('chest_cm'),values.get('thigh_cm'),values.get('arm_cm'),values.get('note'))); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def get_body_measurements(user_id,limit=90):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM body_measurement_logs WHERE user_id=%s ORDER BY log_date DESC LIMIT %s",(user_id,limit)); return cursor.fetchall()
+    finally: conn.close()
