@@ -157,7 +157,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V6.3 is running!"
+    return "LINE Food AI Bot V6.4 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -2118,8 +2118,8 @@ def pending_meal_flex(p):
         body.append({"type":"text","text":f"・{f.get('name') or f.get('food_name') or '食物'}｜{round(float(f.get('calories') or 0))} kcal｜{src}","size":"sm","margin":"sm","wrap":True})
     footer={"type":"box","layout":"vertical","spacing":"sm","contents":[
       _action_button("✅ 確認儲存",f"pending:confirm:{p['id']}","primary"),
-      _action_button("✏️ 我要修改",f"pending:edit:{p['id']}"),
-      _action_button("➕ 少算一樣",f"pending:add:{p['id']}"),
+      _action_button("✏️ 修改這餐",f"pending:edit:{p['id']}"),
+      _action_button("➕ 加漏掉的食物",f"pending:add:{p['id']}"),
       _action_button("🗑️ 取消",f"pending:cancel:{p['id']}")]}
     return FlexMessage(alt_text="📸 餐點等待確認",contents=FlexContainer.from_dict(
       {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},"footer":footer}))
@@ -2180,6 +2180,7 @@ def handle_postback_v56(event):
         if m:
             p=get_pending_meal(user_id,int(m.group(1)))
             row=confirm_pending_meal(user_id,int(m.group(1)))
+            clear_record_context(user_id)
             if row:
                 d=(p or row).get("meal_date")
                 reply_messages(event.reply_token,[history_day_flex(user_id,d)])
@@ -2187,10 +2188,23 @@ def handle_postback_v56(event):
             return
         m=re.match(r'pending:cancel:(\d+)$',data)
         if m:
-            cancel_pending_meal(user_id,int(m.group(1))); reply_text(event.reply_token,"🗑️ 好，這份沒有記進飲食帳本。"); return
+            cancel_pending_meal(user_id,int(m.group(1))); clear_record_context(user_id)
+            reply_text(event.reply_token,"🗑️ 好，這份沒有記進飲食帳本。"); return
         m=re.match(r'pending:(edit|add):(\d+)$',data)
         if m:
-            reply_text(event.reply_token,"✏️ 直接告訴我怎麼改就好，例如：\n「飯只有半碗」\n「餅乾其實3塊」\n「再加一杯無糖豆漿」\n\n我會先更新確認卡，不會直接存進正式紀錄。"); return
+            mode,pid=m.group(1),int(m.group(2))
+            p=get_pending_meal(user_id,pid)
+            if not p:
+                reply_text(event.reply_token,"這份待確認餐點已經不存在了，請重新記錄一次。"); return
+            # 借用 record_context 保存「正在修改哪一張待確認餐點」。
+            # meal_type 欄位在這個 context 中存 pending id，不影響正式餐別。
+            set_record_context(user_id,p.get("meal_date") or _resolve_date("今天"),
+                               "pending_add" if mode=="add" else "pending_edit",str(pid))
+            if mode=="add":
+                reply_text(event.reply_token,"➕ 好，現在是在補這一餐漏掉的食物。\n直接說食物就好，例如：\n「菜脯蛋」\n「一杯無糖豆漿」\n「還有三塊燕麥餅乾」\n\n我會更新同一張確認卡，不會新增成另一餐。")
+            else:
+                reply_text(event.reply_token,"✏️ 好，現在是在修改這一餐。\n你可以連續告訴我：\n「滷雞肉只有兩塊」\n「沒有雙色夾心酥」\n「有菜脯蛋」\n「沒有蛤蜊但有蝦子」\n\n每一句都會更新同一張確認卡，直到你按「確認儲存」或「取消」。")
+            return
         if data=='nav:profile': reply_text(event.reply_token, profile_reply(user_id)); return
         if data=='help:food': reply_text(event.reply_token,"📸 記一餐\n\n拍餐點照片，或直接打：\n「早餐吃蛋餅豆漿」\n「早餐蛋、午餐雞胸便當、晚餐鮭魚地瓜」\n\n記錯直接說「飯只有半碗」就好。"); return
         if data=='help:edit': reply_text(event.reply_token,"✏️ 修改／刪除\n\n直接說：\n・飯只有半碗\n・那是豆干不是肉\n・刪掉上一餐\n・重置今天"); return
@@ -2357,6 +2371,49 @@ def handle_text(event):
         ctx=get_record_context(user_id)
         if ctx:
             d=_resolve_date(ctx.get("target_date")); typ=ctx.get("record_type")
+
+            # V6.4：真正的「待確認餐點修改模式」。
+            # 按過修改/補漏後，後續每一句都優先修改同一張 pending card，
+            # 不再掉去「吃什麼建議」或一般聊天。
+            if typ in ("pending_edit","pending_add"):
+                try:
+                    pid=int(ctx.get("meal_type") or 0)
+                except Exception:
+                    pid=0
+                pending=get_pending_meal(user_id,pid) if pid else get_pending_meal(user_id)
+                if not pending:
+                    clear_record_context(user_id)
+                    reply_text(event.reply_token,"這份待確認餐點已經不存在了，請重新記錄一次。")
+                    return
+
+                base={"meal_name":pending.get("meal_type") or "這一餐",
+                      "foods":pending.get("foods") or [],
+                      "calories":pending.get("calories") or 0,
+                      "protein":pending.get("protein") or 0,
+                      "carbs":pending.get("carbs") or 0,
+                      "fat":pending.get("fat") or 0,
+                      "fiber":pending.get("fiber") or 0,
+                      "sodium":pending.get("sodium") or 0}
+
+                t=text.strip()
+                # 「有菜脯蛋 / 菜脯蛋 / 再加...」在修改模式一律視為補食物。
+                add_like=(typ=="pending_add" or
+                          bool(re.match(r'^(?:再加|加上|補上|還有|有|漏了|漏掉)\s*',t)) or
+                          not any(k in t for k in ["沒有","沒吃","沒喝","不是","改成","只有","只吃","只喝","一半","半份","少一點","比較少","比較多","更多","刪掉","刪除","拿掉"]))
+                if add_like:
+                    clean=re.sub(r'^(?:再加|加上|補上|還有|有|漏了|漏掉)\s*','',t).strip() or t
+                    changed=add_food_to_analysis(base,clean)
+                else:
+                    changed=correct_food_analysis(base,t)
+
+                changed=enrich_foods_from_catalog(changed)
+                row=update_pending_meal(user_id,pending["id"],
+                                        _dedupe_foods(changed.get("foods") or []),
+                                        source_images=pending.get("source_images") or [])
+                # 保持 context，不清除；讓使用者可以連續改好幾句。
+                reply_messages(event.reply_token,[pending_meal_flex(row)])
+                return
+
             if typ=="meal":
                 mt=ctx.get("meal_type") or "其他"
                 start_loading(user_id,60)
@@ -2428,13 +2485,18 @@ def handle_text(event):
         # -------------------------------------------------
         # V6.1：待確認餐點修正，優先於一般新增
         pending=get_pending_meal(user_id)
-        if pending and any(k in text for k in ["其實","改成","不是","只有","一半","沒吃","不要","再加","還有","漏掉","少算"]):
+        if pending and any(k in text for k in [
+            "其實","改成","不是","只有","一半","半份","沒吃","沒喝","沒有","不要",
+            "刪掉","刪除","拿掉","再加","加上","補上","還有","漏掉","漏了","少算",
+            "只吃","只喝","比較少","比較多"
+        ]):
             base={"meal_name":pending.get("meal_type") or "這一餐","foods":pending.get("foods") or [],
                   "calories":pending.get("calories") or 0,"protein":pending.get("protein") or 0,
                   "carbs":pending.get("carbs") or 0,"fat":pending.get("fat") or 0,
                   "fiber":pending.get("fiber") or 0,"sodium":pending.get("sodium") or 0}
-            if any(k in text for k in ["再加","還有","漏掉","少算"]):
-                changed=add_food_to_analysis(base,text)
+            if any(k in text for k in ["再加","加上","補上","還有","漏掉","漏了","少算"]):
+                clean=re.sub(r'^(?:再加|加上|補上|還有|有|漏了|漏掉)\s*','',text.strip()).strip() or text
+                changed=add_food_to_analysis(base,clean)
             else:
                 changed=correct_food_analysis(base,text)
             changed=enrich_foods_from_catalog(changed)
