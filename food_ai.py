@@ -1359,7 +1359,7 @@ def food_chat(
 6. 使用者指定想吃某樣東西時，不要只禁止；優先告訴他怎麼搭配、怎麼調整份量比較適合今天。
 7. 問運動時，依目標、活動量及使用者說的時間/疲勞程度，直接給可執行安排。若沒有時間資訊，預設給 20～40 分鐘版本。
 8. 運動安排以一般成人安全範圍為主，可用快走、腳踏車、基礎阻力訓練、深蹲、臀橋、划船、推舉、核心等；若使用者提到疼痛、受傷、疾病或醫療限制，不要硬排動作，改請其依醫療專業建議調整。
-9. 可以稍微嘲諷羞辱體重、身材、外貌，不鼓勵極端節食。
+9. 可以稍微吐槽飲食選擇或偷懶行為，但不要羞辱體重、身材或外貌，也不要鼓勵極端節食。
 10. 若資料不足，仍可提供一般建議，但要簡短說明「先用一般版」。
 
 語氣示例（不要固定照抄）：
@@ -1372,3 +1372,136 @@ def food_chat(
         store=False
     )
     return response.output_text.strip()
+
+
+# =========================================================
+# V6.1 台灣食品資料庫整合
+# =========================================================
+def _db_food_search(query, brand=None, limit=8):
+    """Lazy import，避免 food_ai.py 與 database.py 互相 import。"""
+    try:
+        from database import search_food_catalog
+        return search_food_catalog(query, brand=brand, limit=limit) or []
+    except Exception as e:
+        print(f"FOOD_CATALOG_SEARCH_ERROR: {e}", flush=True)
+        return []
+
+
+def _catalog_item_to_food(row, quantity_multiplier=1.0):
+    """把 Neon food_catalog 一筆資料轉成 FOOD_SCHEMA 的 food 格式。"""
+    m = max(float(quantity_multiplier or 1), 0)
+    return {
+        "name": row.get("product_name") or "未命名食品",
+        "quantity": row.get("serving_description") or "1份",
+        "estimated_grams": round(float(row.get("serving_grams") or 0) * m, 1),
+        "calories": round(float(row.get("calories") or 0) * m, 1),
+        "protein": round(float(row.get("protein") or 0) * m, 1),
+        "carbs": round(float(row.get("carbs") or 0) * m, 1),
+        "fat": round(float(row.get("fat") or 0) * m, 1),
+        "fiber": round(float(row.get("fiber") or 0) * m, 1),
+        "sodium": round(float(row.get("sodium") or 0) * m, 1),
+        "sugar": round(float(row.get("sugar") or 0) * m, 1),
+        "confidence": 0.98 if row.get("verified") else 0.90,
+        "source_type": "official" if row.get("verified") else (row.get("source_type") or "catalog"),
+        "source_ref": str(row.get("id") or ""),
+        "brand": row.get("brand"),
+        "source_name": row.get("source_name"),
+    }
+
+
+def lookup_food_catalog(query, brand=None, limit=8):
+    """供 app.py 使用：搜尋台灣食品/零食/連鎖餐飲資料庫。"""
+    q = str(query or "").strip()
+    if not q:
+        return []
+    return [_catalog_item_to_food(x) for x in _db_food_search(q, brand=brand, limit=limit)]
+
+
+def enrich_foods_from_catalog(data):
+    """
+    對 AI 已辨識出的每個品項再查 Neon。
+    只有高可信的精確/品牌品項才覆蓋營養數字；
+    一般料理仍保留 AI 估算，避免「雞腿」錯套某品牌雞腿。
+    """
+    if not isinstance(data, dict):
+        return data
+    foods = data.get("foods") or []
+    enriched = []
+    for food in foods:
+        f = dict(food)
+        name = str(f.get("name") or "").strip()
+        matches = _db_food_search(name, limit=3) if name else []
+        if matches:
+            best = matches[0]
+            exact = str(best.get("product_name") or "").strip().lower() == name.lower()
+            if exact and (best.get("verified") or best.get("brand")):
+                serving_g = float(best.get("serving_grams") or 0)
+                estimated_g = float(f.get("estimated_grams") or 0)
+                multiplier = estimated_g / serving_g if serving_g > 0 and estimated_g > 0 else 1.0
+                cat = _catalog_item_to_food(best, multiplier)
+                # 保留 AI 對人類可讀份量的描述
+                cat["quantity"] = f.get("quantity") or cat["quantity"]
+                enriched.append(cat)
+                continue
+        f.setdefault("sugar", 0)
+        f.setdefault("source_type", "ai")
+        f.setdefault("source_ref", "")
+        enriched.append(f)
+
+    data = dict(data)
+    data["foods"] = enriched
+    # 永遠由 foods 重算 total，避免 AI total 與明細不同。
+    data["total"] = {
+        "calories": round(sum(float(x.get("calories") or 0) for x in enriched), 1),
+        "protein": round(sum(float(x.get("protein") or 0) for x in enriched), 1),
+        "carbs": round(sum(float(x.get("carbs") or 0) for x in enriched), 1),
+        "fat": round(sum(float(x.get("fat") or 0) for x in enriched), 1),
+        "fiber": round(sum(float(x.get("fiber") or 0) for x in enriched), 1),
+        "sodium": round(sum(float(x.get("sodium") or 0) for x in enriched), 1),
+        "sugar": round(sum(float(x.get("sugar") or 0) for x in enriched), 1),
+    }
+    return data
+
+
+def analyze_food_text(text, memories=None):
+    """
+    V6.1 文字記餐入口。
+    先嘗試 Neon 精確食品匹配；無法可靠匹配才交給 AI。
+    """
+    q = str(text or "").strip()
+    matches = _db_food_search(q, limit=5)
+    if matches:
+        best = matches[0]
+        product = str(best.get("product_name") or "").strip()
+        # 完整品名/別名命中時直接採資料庫，避免 AI 重估官方食品。
+        aliases = [str(x).strip().lower() for x in (best.get("aliases") or [])]
+        if q.lower() == product.lower() or q.lower() in aliases:
+            food = _catalog_item_to_food(best)
+            return {
+                "meal_name": product,
+                "foods": [food],
+                "total": {
+                    "calories": food["calories"], "protein": food["protein"],
+                    "carbs": food["carbs"], "fat": food["fat"],
+                    "fiber": food["fiber"], "sodium": food["sodium"],
+                    "sugar": food["sugar"],
+                },
+                "confidence": "high",
+                "comment": "已優先使用食品資料庫資料。",
+            }
+
+    memory_lines = []
+    for memory in memories or []:
+        mt = memory.get("memory_text", "")
+        if mt:
+            memory_lines.append(f"- {mt}")
+
+    prompt = f"""分析使用者這段飲食紀錄：\n「{q}」\n\n請辨識所有實際吃喝的品項與份量，逐項估算營養，再加總。不要把「刪除、修改、查詢、今天吃什麼」等操作句當成食物。"""
+    if memory_lines:
+        prompt += "\n\n使用者食物記憶（合理相符時才參考）：\n" + "\n".join(memory_lines)
+
+    data = structured_response(
+        FOOD_SYSTEM_PROMPT, prompt, FOOD_SCHEMA,
+        "food_text_analysis_v61", max_tokens=1600
+    )
+    return enrich_foods_from_catalog(data)
