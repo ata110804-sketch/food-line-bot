@@ -284,6 +284,18 @@ def init_database():
         with conn.cursor() as cursor:
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS record_contexts (
+                    user_id TEXT PRIMARY KEY,
+                    target_date DATE NOT NULL,
+                    record_type TEXT NOT NULL,
+                    meal_type TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """
+            )
+
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS water_logs (
                     id SERIAL PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -3447,6 +3459,33 @@ def upsert_food_catalog(item):
             ON CONFLICT(brand,product_name,serving_description) DO UPDATE SET aliases=EXCLUDED.aliases,serving_grams=EXCLUDED.serving_grams,calories=EXCLUDED.calories,protein=EXCLUDED.protein,carbs=EXCLUDED.carbs,fat=EXCLUDED.fat,saturated_fat=EXCLUDED.saturated_fat,sugar=EXCLUDED.sugar,fiber=EXCLUDED.fiber,sodium=EXCLUDED.sodium,source_type=EXCLUDED.source_type,source_name=EXCLUDED.source_name,source_url=EXCLUDED.source_url,verified=EXCLUDED.verified,data_date=EXCLUDED.data_date,updated_at=NOW() RETURNING *""",
             (item.get('brand'),item.get('category') or '一般食品',item['product_name'],item.get('aliases') or [],item.get('serving_description'),item.get('serving_grams'),item.get('calories'),item.get('protein'),item.get('carbs'),item.get('fat'),item.get('saturated_fat'),item.get('sugar'),item.get('fiber'),item.get('sodium'),item.get('source_type') or 'curated',item.get('source_name'),item.get('source_url'),bool(item.get('verified')),item.get('data_date'))); row=cursor.fetchone()
         conn.commit(); return row
+    finally: conn.close()
+
+def set_record_context(user_id,target_date,record_type,meal_type=None):
+    target_date=normalize_date(target_date); conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""INSERT INTO record_contexts(user_id,target_date,record_type,meal_type,updated_at)
+                VALUES(%s,%s,%s,%s,NOW())
+                ON CONFLICT(user_id) DO UPDATE SET target_date=EXCLUDED.target_date,record_type=EXCLUDED.record_type,meal_type=EXCLUDED.meal_type,updated_at=NOW()
+                RETURNING *""",(user_id,target_date,record_type,meal_type)); row=cursor.fetchone()
+        conn.commit(); return row
+    finally: conn.close()
+
+def get_record_context(user_id,max_age_minutes=30):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""SELECT * FROM record_contexts WHERE user_id=%s
+                AND updated_at >= NOW()-(%s || ' minutes')::interval""",(user_id,str(int(max_age_minutes))))
+            return cursor.fetchone()
+    finally: conn.close()
+
+def clear_record_context(user_id):
+    conn=get_connection()
+    try:
+        with conn.cursor() as cursor: cursor.execute("DELETE FROM record_contexts WHERE user_id=%s",(user_id,))
+        conn.commit()
     finally: conn.close()
 
 def save_body_measurement(user_id,log_date=None,**values):
