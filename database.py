@@ -84,6 +84,9 @@ def init_database():
                 """
             )
 
+            # V6.4: 歷史餐點管理需要 soft delete；舊資料庫也可安全補欄位。
+            cursor.execute("ALTER TABLE meals ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
+
             # =================================================
             # 個人資料
             # =================================================
@@ -3393,19 +3396,58 @@ def cancel_pending_meal(user_id,pending_id):
     finally: conn.close()
 
 def confirm_pending_meal(user_id,pending_id):
+    """V6.4: 將 pending meal 轉成既有 meals JSONB 格式，一次只存一餐。"""
     conn=get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM pending_meals WHERE id=%s AND user_id=%s AND status='pending' FOR UPDATE",(pending_id,user_id)); p=cursor.fetchone()
-            if not p: return None
-            for food in (p.get('foods') or []):
-                cursor.execute("""INSERT INTO meals(user_id,meal_type,meal_date,food_name,calories,protein,carbs,fat,fiber,sodium,sugar,source_type,source_ref,pending_meal_id)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (user_id,p.get('meal_type') or '其他',p['meal_date'],food.get('food_name') or food.get('name') or '未命名食物',float(food.get('calories') or 0),float(food.get('protein') or 0),float(food.get('carbs') or 0),float(food.get('fat') or 0),float(food.get('fiber') or 0),float(food.get('sodium') or 0),float(food.get('sugar') or 0),food.get('source_type') or 'ai',str(food.get('source_ref') or ''),pending_id))
-            cursor.execute("UPDATE pending_meals SET status='confirmed',updated_at=NOW() WHERE id=%s RETURNING *",(pending_id,)); row=cursor.fetchone()
-        conn.commit(); return row
-    except: conn.rollback(); raise
-    finally: conn.close()
+            cursor.execute(
+                "SELECT * FROM pending_meals WHERE id=%s AND user_id=%s AND status='pending' FOR UPDATE",
+                (pending_id,user_id)
+            )
+            p=cursor.fetchone()
+            if not p:
+                return None
+
+            foods=p.get('foods') or []
+            meal_name="、".join(
+                str(x.get('food_name') or x.get('name') or '食物') for x in foods
+            )[:240] or (p.get('meal_type') or '餐點')
+
+            # meals 原本的正式 schema 是「一餐一列 + foods JSONB」，
+            # 不是一個食物一列。沿用原 schema 可避免確認按鈕因欄位不存在而失敗。
+            cursor.execute(
+                """INSERT INTO meals(
+                       user_id,meal_date,meal_time,meal_type,meal_name,foods,
+                       calories,protein,carbs,fat,fiber,sodium,
+                       ai_confidence,ai_comment,corrected
+                   )
+                   VALUES(
+                       %s,%s,NOW(),%s,%s,%s::jsonb,
+                       %s,%s,%s,%s,%s,%s,
+                       %s,%s,%s
+                   )
+                   RETURNING *""",
+                (
+                    user_id,p['meal_date'],p.get('meal_type') or '其他',meal_name,
+                    json.dumps(foods,ensure_ascii=False),
+                    float(p.get('calories') or 0),float(p.get('protein') or 0),
+                    float(p.get('carbs') or 0),float(p.get('fat') or 0),
+                    float(p.get('fiber') or 0),float(p.get('sodium') or 0),
+                    'pending_confirmed','由待確認餐點確認儲存',True
+                )
+            )
+            meal_row=cursor.fetchone()
+            cursor.execute(
+                "UPDATE pending_meals SET status='confirmed',updated_at=NOW() WHERE id=%s",
+                (pending_id,)
+            )
+        conn.commit()
+        return meal_row
+    except:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def get_active_meals_by_date(user_id,target_date=None,meal_type=None):
     target_date=normalize_date(target_date); conn=get_connection()
