@@ -40,6 +40,8 @@ add_food_to_analysis = _food_ai.add_food_to_analysis
 classify_user_text = _food_ai.classify_user_text
 food_chat = _food_ai.food_chat
 off_topic_reply = _food_ai.off_topic_reply
+lookup_food_catalog = getattr(_food_ai, 'lookup_food_catalog', lambda q, brand=None, limit=8: [])
+enrich_foods_from_catalog = getattr(_food_ai, 'enrich_foods_from_catalog', lambda x: x)
 
 # 相容保護：即使 Render 暫時還載到舊版 food_ai.py，也不會因缺少
 # analyze_food_text 而整個服務啟動失敗。
@@ -109,6 +111,25 @@ from database import (
     get_meal_range,
     save_inbody,
     get_inbody_logs,
+    save_weight_history,
+    delete_weight_history,
+    get_weight_history,
+    save_water_history,
+    get_water_history,
+    delete_water_entry,
+    get_water_range,
+    create_pending_meal,
+    get_pending_meal,
+    update_pending_meal,
+    cancel_pending_meal,
+    confirm_pending_meal,
+    get_active_meals_by_date,
+    soft_delete_meal,
+    soft_delete_meal_group,
+    restore_meal,
+    search_food_catalog,
+    save_body_measurement,
+    get_body_measurements,
 )
 
 
@@ -133,7 +154,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V6.0 is running!"
+    return "LINE Food AI Bot V6.1 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -1553,7 +1574,8 @@ def help_menu_flex():
 def trend_menu_flex():
     cards=[
       _nav_card("體重趨勢","看 7／30／90 天體重變化。","看 30 天","trend:weight:30","⚖️"),
-      _nav_card("營養趨勢","每日熱量折線＋今天營養比例。","看 30 天","trend:nutrition:30","🍽️"),
+      _nav_card("營養趨勢","看每日熱量變化，不用圓餅圖。","看 30 天","trend:nutrition:30","🍽️"),
+      _nav_card("喝水趨勢","看每天實際喝了多少。","看 30 天","trend:water:30","💧"),
       _nav_card("運動趨勢","每週／每月運動分鐘與消耗。","看 30 天","trend:exercise:30","🏋️"),
       _nav_card("InBody 趨勢","體脂率與骨骼肌量變化。","看 InBody","trend:inbody:90","🧬"),
     ]
@@ -1571,31 +1593,78 @@ def _quickchart_url(chart_type, labels, datasets, title=""):
 def _chart_image(url):
     return ImageMessage(original_content_url=url, preview_image_url=url)
 
+def _progress_bar(value, target, width=10):
+    if not target or target <= 0:
+        return "░" * width
+    ratio=max(0,min(1,float(value)/float(target)))
+    n=round(ratio*width)
+    return "█"*n+"░"*(width-n)
+
+def _metric_line(label, used, target, unit):
+    used=float(used or 0); target=float(target or 0)
+    if target <= 0:
+        return f"{label} {round(used,1):g} {unit}"
+    diff=target-used
+    tail=f"還有 {round(diff,1):g}" if diff>=0 else f"超過 {round(abs(diff),1):g}"
+    return f"{label} {round(used,1):g} / {round(target,1):g} {unit}｜{tail}"
+
+def water_dashboard_flex(user_id, target_date=None, just_added=None):
+    d=_resolve_date(target_date)
+    rows=get_water_history(user_id,d)
+    total=sum(float(r.get("amount_ml") or 0) for r in rows)
+    target=float(get_water_target(user_id) or 2000)
+    pct=round(total/target*100) if target else 0
+    title="今天" if d==datetime.now(TAIWAN_TZ).date() else d.strftime("%m/%d")
+    body=[
+      {"type":"text","text":f"💧 {title}喝水","weight":"bold","size":"xl"},
+      {"type":"text","text":f"{round(total):,} ml","weight":"bold","size":"xxl","margin":"md"},
+      {"type":"text","text":f"目標 {round(target):,} ml｜{pct}%","size":"sm","color":"#666666"},
+      {"type":"text","text":_progress_bar(total,target,12),"size":"md","margin":"sm"},
+      {"type":"text","text":f"🎯 還差 {max(0,round(target-total)):,} ml" if total<target else f"🎉 已達標 {round(total-target):,} ml","size":"sm","margin":"md","wrap":True},
+    ]
+    if just_added:
+        body.insert(1,{"type":"text","text":f"剛剛 +{round(just_added):,} ml","size":"sm","color":"#555555"})
+    footer={"type":"box","layout":"vertical","spacing":"sm","contents":[
+      {"type":"box","layout":"horizontal","spacing":"sm","contents":[
+        _action_button("+200","water:add:200","primary"),_action_button("+300","water:add:300","primary")]},
+      {"type":"box","layout":"horizontal","spacing":"sm","contents":[
+        _action_button("+500","water:add:500"),_action_button("+600","water:add:600")]},
+      _action_button("↩️ 撤銷上一筆","water:undo"),
+      _action_button("📈 30日喝水","trend:water:30")
+    ]}
+    return FlexMessage(alt_text=f"💧 {title}喝水 {round(total)} ml",contents=FlexContainer.from_dict(
+      {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},"footer":footer}))
+
 def today_dashboard_flex(user_id):
     totals=totals_to_dict(get_today_totals(user_id))
     targets=get_effective_targets(user_id) or {}
-    water=get_today_water(user_id) or {}
-    cal=float(totals.get("calories") or 0); ct=float(targets.get("calorie_target") or 0)
-    p=float(totals.get("protein") or 0); c=float(totals.get("carbs") or 0); f=float(totals.get("fat") or 0)
-    wt=float(water.get("total_ml") or 0); wtg=float(water.get("target_ml") or 2000)
-    def pct(v,t): return min(100,round(v/t*100)) if t else 0
-    body=[
-      {"type":"text","text":"📊 今天","weight":"bold","size":"xxl"},
-      {"type":"text","text":f"🔥 {round(cal)} / {round(ct) if ct else '—'} kcal","weight":"bold","size":"lg","margin":"md"},
-      {"type":"text","text":f"🥩 蛋白質 {round(p,1)}g　🍚 碳水 {round(c,1)}g","size":"sm","wrap":True},
-      {"type":"text","text":f"🥑 脂肪 {round(f,1)}g　💧 水 {round(wt)} / {round(wtg)}ml","size":"sm","wrap":True},
-      {"type":"separator","margin":"md"},
-      {"type":"text","text":f"熱量 {pct(cal,ct)}%　｜　喝水 {pct(wt,wtg)}%","size":"sm","color":"#666666","margin":"md"}]
-    footer=[_action_button("🍱 吃什麼","diet:menu","primary"),_action_button("📈 看趨勢","trend:menu")]
+    wt=float(get_water_total(user_id) or 0); wtg=float(get_water_target(user_id) or 2000)
+    metrics=[
+      ("🔥 熱量",totals.get("calories"),targets.get("calorie_target"),"kcal"),
+      ("🥩 蛋白質",totals.get("protein"),targets.get("protein_target"),"g"),
+      ("🍚 碳水",totals.get("carbs"),targets.get("carbs_target"),"g"),
+      ("🥑 脂肪",totals.get("fat"),targets.get("fat_target"),"g"),
+      ("💧 喝水",wt,wtg,"ml"),
+    ]
+    body=[{"type":"text","text":"📊 今日進度","weight":"bold","size":"xxl"},
+          {"type":"text","text":"重要的直接看剩多少，不塞圓餅圖。","size":"sm","color":"#777777","margin":"sm"}]
+    for label,used,target,unit in metrics:
+        used=float(used or 0); target=float(target or 0)
+        body += [{"type":"text","text":_metric_line(label,used,target,unit),"weight":"bold","size":"sm","margin":"md","wrap":True},
+                 {"type":"text","text":_progress_bar(used,target,12),"size":"sm","color":"#555555"}]
+    footer=[_action_button("🍱 吃什麼","diet:menu","primary"),_action_button("💧 喝水","water:dash"),_action_button("📅 歷史紀錄","history:today"),_action_button("📈 趨勢","trend:menu")]
     return FlexMessage(alt_text="📊 今日進度",contents=FlexContainer.from_dict(
       {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},
        "footer":{"type":"box","layout":"vertical","spacing":"sm","contents":footer}}))
 
-def nutrition_pie_url(user_id):
-    t=totals_to_dict(get_today_totals(user_id))
-    vals=[round(float(t.get("protein") or 0)*4),round(float(t.get("carbs") or 0)*4),round(float(t.get("fat") or 0)*9)]
-    return _quickchart_url("doughnut",["蛋白質","碳水","脂肪"],
-        [{"label":"kcal","data":vals}], "今日三大營養素熱量比例")
+def water_chart_url(user_id,days=30):
+    end=datetime.now(TAIWAN_TZ).date()
+    start=end-__import__("datetime").timedelta(days=days-1)
+    rows=get_water_range(user_id,start,end)
+    if len(rows)<2: return None
+    labels=[r["log_date"].strftime("%m/%d") for r in rows]
+    vals=[round(float(r.get("total_ml") or 0)) for r in rows]
+    return _quickchart_url("bar",labels,[{"label":"飲水 ml","data":vals}],"喝水趨勢")
 
 def weight_chart_url(user_id,days=30):
     rows=list(reversed(get_weight_logs(user_id,limit=max(days,7))))
@@ -1862,6 +1931,117 @@ def diet_choices_flex(code):
           "footer":{"type":"box","layout":"vertical","contents":[_postback_button("↩️ 換飲食模式","diet:menu")]}})
     return FlexMessage(alt_text=f"🍱 {p['title']} A/B/C",contents=FlexContainer.from_dict({"type":"carousel","contents":cards}))
 
+
+def _resolve_date(value=None):
+    today=datetime.now(TAIWAN_TZ).date()
+    if value is None or value in ("今天","今日","today"): return today
+    if value in ("昨天","昨日"): return today-__import__("datetime").timedelta(days=1)
+    if value in ("前天",): return today-__import__("datetime").timedelta(days=2)
+    if hasattr(value,"year"): return value
+    txt=str(value).strip()
+    m=re.search(r'(?:(\d{4})[/-])?(\d{1,2})[/-](\d{1,2})',txt)
+    if m:
+        y=int(m.group(1) or today.year); mo=int(m.group(2)); d=int(m.group(3))
+        return __import__("datetime").date(y,mo,d)
+    return today
+
+def _extract_date_from_text(text):
+    if "前天" in text: return _resolve_date("前天")
+    if "昨天" in text or "昨日" in text: return _resolve_date("昨天")
+    m=re.search(r'(?:(\d{4})[/-])?(\d{1,2})[/-](\d{1,2})',text)
+    if m: return _resolve_date(m.group(0))
+    return _resolve_date("今天")
+
+def _meal_group_totals(rows):
+    out={"calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sodium":0,"sugar":0}
+    for r in rows:
+        for k in out: out[k]+=float(r.get(k) or 0)
+    return out
+
+def history_day_flex(user_id,target_date=None):
+    d=_resolve_date(target_date); rows=get_active_meals_by_date(user_id,d)
+    groups={}
+    for r in rows: groups.setdefault(r.get("meal_type") or "其他",[]).append(r)
+    order=["早餐","午餐","晚餐","點心","其他"]
+    body=[{"type":"text","text":f"📅 {d.strftime('%m/%d')} 飲食紀錄","weight":"bold","size":"xl"}]
+    total=0
+    for mt in order:
+        rs=groups.get(mt,[])
+        if not rs: continue
+        t=_meal_group_totals(rs); total+=t["calories"]
+        body += [{"type":"separator","margin":"md"},
+                 {"type":"text","text":f"{'🌅' if mt=='早餐' else '🌞' if mt=='午餐' else '🌙' if mt=='晚餐' else '🍪'} {mt}｜{round(t['calories'])} kcal","weight":"bold","margin":"md"},
+                 {"type":"text","text":"、".join(str(x.get("food_name") or x.get("meal_name") or "食物") for x in rs)[:180],"size":"sm","color":"#666666","wrap":True},
+                 _action_button(f"✏️ 管理{mt}",f"history:meal:{d.isoformat()}:{mt}")]
+    if not rows: body.append({"type":"text","text":"這天還沒有飲食紀錄。","margin":"md","color":"#777777"})
+    else: body.insert(1,{"type":"text","text":f"🔥 全日 {round(total)} kcal","weight":"bold","size":"lg","margin":"md"})
+    footer={"type":"box","layout":"horizontal","spacing":"sm","contents":[
+      _action_button("⬅️ 前一天",f"history:day:{(d-__import__('datetime').timedelta(days=1)).isoformat()}"),
+      _action_button("➡️ 後一天",f"history:day:{(d+__import__('datetime').timedelta(days=1)).isoformat()}")]}
+    return FlexMessage(alt_text=f"📅 {d.strftime('%m/%d')} 飲食紀錄",contents=FlexContainer.from_dict(
+      {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},"footer":footer}))
+
+def meal_manage_flex(user_id,d,meal_type):
+    d=_resolve_date(d); rows=get_active_meals_by_date(user_id,d,meal_type); t=_meal_group_totals(rows)
+    body=[{"type":"text","text":f"✏️ {d.strftime('%m/%d')} {meal_type}","weight":"bold","size":"xl"},
+          {"type":"text","text":f"🔥 {round(t['calories'])} kcal｜共 {len(rows)} 項","size":"sm","margin":"sm","color":"#666666"}]
+    for r in rows[:10]:
+        body += [{"type":"text","text":f"・{r.get('food_name') or r.get('meal_name') or '食物'}　{round(float(r.get('calories') or 0))} kcal","size":"sm","margin":"sm","wrap":True},
+                 _action_button("🗑️ 刪除此項",f"history:itemdel:{r['id']}:{d.isoformat()}:{meal_type}")]
+    footer={"type":"box","layout":"vertical","spacing":"sm","contents":[
+      _action_button("🗑️ 刪除整餐",f"history:deleteask:{d.isoformat()}:{meal_type}"),
+      _action_button("📸 重新記錄","help:food"),
+      _action_button("↩️ 回當日紀錄",f"history:day:{d.isoformat()}")]}
+    return FlexMessage(alt_text=f"✏️ 管理 {meal_type}",contents=FlexContainer.from_dict(
+      {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},"footer":footer}))
+
+def weight_saved_flex(user_id,row):
+    d=row["log_date"]; w=float(row["weight_kg"])
+    hist=sorted(get_weight_history(user_id,limit=180),key=lambda x:x["log_date"])
+    prev=None
+    for x in hist:
+        if x["log_date"]<d: prev=x
+    diff=(w-float(prev["weight_kg"])) if prev else None
+    body=[{"type":"text","text":"⚖️ 體重已記錄","weight":"bold","size":"xl"},
+          {"type":"text","text":d.strftime("%Y/%m/%d"),"size":"sm","color":"#777777","margin":"sm"},
+          {"type":"text","text":f"{w:g} kg","weight":"bold","size":"xxl","margin":"md"}]
+    if diff is not None: body.append({"type":"text","text":f"較前一筆 {'+' if diff>0 else ''}{diff:.1f} kg","size":"sm","color":"#666666"})
+    footer={"type":"box","layout":"vertical","spacing":"sm","contents":[
+      _action_button("🗑️ 刪除這筆",f"weight:delete:{d.isoformat()}"),
+      _action_button("📈 體重趨勢","trend:weight:30")]}
+    return FlexMessage(alt_text=f"⚖️ {d.strftime('%m/%d')} {w:g} kg",contents=FlexContainer.from_dict(
+      {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},"footer":footer}))
+
+def _dedupe_foods(foods):
+    result=[]; seen={}
+    for f in foods or []:
+        name=re.sub(r'\s+','',str(f.get("name") or f.get("food_name") or "")).lower()
+        key=name
+        if key and key in seen:
+            # 同名且營養接近視為重複照片，不再加第二次
+            old=result[seen[key]]
+            if abs(float(old.get("calories") or 0)-float(f.get("calories") or 0)) <= max(40,float(old.get("calories") or 0)*0.25):
+                continue
+        if key: seen[key]=len(result)
+        result.append(f)
+    return result
+
+def pending_meal_flex(p):
+    foods=p.get("foods") or []
+    body=[{"type":"text","text":"📸 餐點等待確認","weight":"bold","size":"xl"},
+          {"type":"text","text":f"已合併 {len(p.get('source_images') or [])} 張照片｜確認後才會正式記錄","size":"sm","color":"#777777","wrap":True,"margin":"sm"},
+          {"type":"text","text":f"🔥 約 {round(float(p.get('calories') or 0))} kcal","weight":"bold","size":"xxl","margin":"md"}]
+    for f in foods[:10]:
+        src="✓資料庫" if f.get("source_type") in ("official","catalog") else "AI估算"
+        body.append({"type":"text","text":f"・{f.get('name') or f.get('food_name') or '食物'}｜{round(float(f.get('calories') or 0))} kcal｜{src}","size":"sm","margin":"sm","wrap":True})
+    footer={"type":"box","layout":"vertical","spacing":"sm","contents":[
+      _action_button("✅ 確認儲存",f"pending:confirm:{p['id']}","primary"),
+      _action_button("✏️ 我要修改",f"pending:edit:{p['id']}"),
+      _action_button("➕ 少算一樣",f"pending:add:{p['id']}"),
+      _action_button("🗑️ 取消",f"pending:cancel:{p['id']}")]}
+    return FlexMessage(alt_text="📸 餐點等待確認",contents=FlexContainer.from_dict(
+      {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},"footer":footer}))
+
 @handler.add(PostbackEvent)
 def handle_postback_v56(event):
     user_id=get_user_id(event); data=getattr(event.postback,'data','') or ''
@@ -1870,15 +2050,59 @@ def handle_postback_v56(event):
         if data=='help:menu': reply_messages(event.reply_token,[help_menu_flex()]); return
         if data=='trend:menu': reply_messages(event.reply_token,[trend_menu_flex()]); return
         if data=='dash:today':
-            reply_messages(event.reply_token,[today_dashboard_flex(user_id),_chart_image(nutrition_pie_url(user_id))]); return
+            reply_messages(event.reply_token,[today_dashboard_flex(user_id)]); return
+        if data=='water:dash':
+            reply_messages(event.reply_token,[water_dashboard_flex(user_id)]); return
+        m=re.match(r'water:add:(200|300|500|600|1000)$',data)
+        if m:
+            amt=int(m.group(1)); save_water_history(user_id,amt)
+            reply_messages(event.reply_token,[water_dashboard_flex(user_id,just_added=amt)]); return
+        if data=='water:undo':
+            rows=get_water_history(user_id)
+            if rows: delete_water_entry(user_id,rows[-1]['id'])
+            reply_messages(event.reply_token,[water_dashboard_flex(user_id)]); return
+        if data in ('history:today','history:day:today'):
+            reply_messages(event.reply_token,[history_day_flex(user_id)]); return
+        m=re.match(r'history:day:(\d{4}-\d{2}-\d{2})$',data)
+        if m: reply_messages(event.reply_token,[history_day_flex(user_id,m.group(1))]); return
+        m=re.match(r'history:meal:(\d{4}-\d{2}-\d{2}):(早餐|午餐|晚餐|點心|其他)$',data)
+        if m: reply_messages(event.reply_token,[meal_manage_flex(user_id,m.group(1),m.group(2))]); return
+        m=re.match(r'history:itemdel:(\d+):(\d{4}-\d{2}-\d{2}):(早餐|午餐|晚餐|點心|其他)$',data)
+        if m:
+            soft_delete_meal(user_id,int(m.group(1)))
+            reply_messages(event.reply_token,[meal_manage_flex(user_id,m.group(2),m.group(3))]); return
+        m=re.match(r'history:deleteask:(\d{4}-\d{2}-\d{2}):(早餐|午餐|晚餐|點心|其他)$',data)
+        if m:
+            d,mt=m.group(1),m.group(2)
+            flex={"type":"bubble","body":{"type":"box","layout":"vertical","contents":[{"type":"text","text":f"🗑️ 確定刪除 {d[5:]} {mt}？","weight":"bold","size":"xl"},{"type":"text","text":"刪除後當天營養會依剩餘餐點重新計算。","size":"sm","color":"#666666","margin":"md","wrap":True}]},"footer":{"type":"box","layout":"vertical","spacing":"sm","contents":[_action_button("確認刪除",f"history:delete:{d}:{mt}","primary"),_action_button("取消",f"history:meal:{d}:{mt}")]}}
+            reply_messages(event.reply_token,[FlexMessage(alt_text="確認刪除整餐",contents=FlexContainer.from_dict(flex))]); return
+        m=re.match(r'history:delete:(\d{4}-\d{2}-\d{2}):(早餐|午餐|晚餐|點心|其他)$',data)
+        if m:
+            n=soft_delete_meal_group(user_id,m.group(1),m.group(2))
+            reply_messages(event.reply_token,[history_day_flex(user_id,m.group(1))]); return
+        m=re.match(r'weight:delete:(\d{4}-\d{2}-\d{2})$',data)
+        if m:
+            delete_weight_history(user_id,m.group(1)); reply_text(event.reply_token,"🗑️ 這筆體重已刪除。"); return
+        m=re.match(r'pending:confirm:(\d+)$',data)
+        if m:
+            row=confirm_pending_meal(user_id,int(m.group(1)))
+            if row: reply_messages(event.reply_token,[today_dashboard_flex(user_id)])
+            else: reply_text(event.reply_token,"這份待確認餐點已處理或找不到了。")
+            return
+        m=re.match(r'pending:cancel:(\d+)$',data)
+        if m:
+            cancel_pending_meal(user_id,int(m.group(1))); reply_text(event.reply_token,"🗑️ 好，這份沒有記進飲食帳本。"); return
+        m=re.match(r'pending:(edit|add):(\d+)$',data)
+        if m:
+            reply_text(event.reply_token,"✏️ 直接告訴我怎麼改就好，例如：\n「飯只有半碗」\n「餅乾其實3塊」\n「再加一杯無糖豆漿」\n\n我會先更新確認卡，不會直接存進正式紀錄。"); return
         if data=='nav:profile': reply_text(event.reply_token, profile_reply(user_id)); return
         if data=='help:food': reply_text(event.reply_token,"📸 記一餐\n\n拍餐點照片，或直接打：\n「早餐吃蛋餅豆漿」\n「早餐蛋、午餐雞胸便當、晚餐鮭魚地瓜」\n\n記錯直接說「飯只有半碗」就好。"); return
         if data=='help:edit': reply_text(event.reply_token,"✏️ 修改／刪除\n\n直接說：\n・飯只有半碗\n・那是豆干不是肉\n・刪掉上一餐\n・重置今天"); return
         if data=='help:inbody': reply_text(event.reply_token,"🧬 InBody\n\n直接一行貼給我，例如：\nInBody 體重58.6 體脂31.2 骨骼肌21.8 BMI22.9 內臟脂肪7 基礎代謝1250\n\n有兩筆以上就能畫趨勢圖。"); return
-        m=re.match(r'trend:(weight|nutrition|exercise|inbody):(7|30|90)$',data)
+        m=re.match(r'trend:(weight|nutrition|exercise|inbody|water):(7|30|90)$',data)
         if m:
             kind,days=m.group(1),int(m.group(2))
-            maker={'weight':weight_chart_url,'nutrition':nutrition_chart_url,'exercise':exercise_chart_url,'inbody':inbody_chart_url}[kind]
+            maker={'weight':weight_chart_url,'nutrition':nutrition_chart_url,'exercise':exercise_chart_url,'inbody':inbody_chart_url,'water':water_chart_url}[kind]
             url=maker(user_id,days)
             if not url: reply_text(event.reply_token,"📈 目前資料還不夠畫趨勢圖。至少記錄 2 個不同日期，我就能幫你畫。")
             else: reply_messages(event.reply_token,[_chart_image(url)])
@@ -1976,7 +2200,7 @@ def handle_text(event):
             return
 
         if text in ["今日進度","今天","今日","今天吃多少","今天還能吃多少"]:
-            reply_messages(event.reply_token,[today_dashboard_flex(user_id),_chart_image(nutrition_pie_url(user_id))])
+            reply_messages(event.reply_token,[today_dashboard_flex(user_id)])
             return
 
         if text in ["吃什麼","晚餐吃什麼","午餐吃什麼","早餐吃什麼","不知道吃什麼","我餓了","好餓"]:
@@ -1984,7 +2208,7 @@ def handle_text(event):
             return
 
         if text == "喝水":
-            reply_text(event.reply_token, rich_menu_water_reply(user_id))
+            reply_messages(event.reply_token,[water_dashboard_flex(user_id)])
             return
 
         if text == "運動建議":
@@ -2028,7 +2252,57 @@ def handle_text(event):
         # -------------------------------------------------
         # V5.5 核心文字路由：規則優先於閒聊與 AI
         # -------------------------------------------------
-        # 1) 喝水查詢先攔截，避免「我今天喝了多少水」被當成飲食或喝水新增。
+        # V6.1：待確認餐點修正，優先於一般新增
+        pending=get_pending_meal(user_id)
+        if pending and any(k in text for k in ["其實","改成","不是","只有","一半","沒吃","不要","再加","還有","漏掉","少算"]):
+            base={"meal_name":pending.get("meal_type") or "這一餐","foods":pending.get("foods") or [],
+                  "calories":pending.get("calories") or 0,"protein":pending.get("protein") or 0,
+                  "carbs":pending.get("carbs") or 0,"fat":pending.get("fat") or 0,
+                  "fiber":pending.get("fiber") or 0,"sodium":pending.get("sodium") or 0}
+            if any(k in text for k in ["再加","還有","漏掉","少算"]):
+                changed=add_food_to_analysis(base,text)
+            else:
+                changed=correct_food_analysis(base,text)
+            changed=enrich_foods_from_catalog(changed)
+            row=update_pending_meal(user_id,pending["id"],_dedupe_foods(changed.get("foods") or []),
+                                    source_images=pending.get("source_images") or [])
+            reply_messages(event.reply_token,[pending_meal_flex(row)])
+            return
+
+        # V6.1：指定日期體重。先處理，避免被「個人資料」覆蓋邏輯攔走。
+        wm=re.search(r'(?:體重\s*)?(\d{2,3}(?:\.\d+)?)\s*(?:kg|公斤)?',text,re.I)
+        if wm and "體重" in text and any(k in text for k in ["今天","今日","昨天","昨日","前天","/","-"]):
+            d=_extract_date_from_text(text); w=float(wm.group(1))
+            row=save_weight_history(user_id,w,d)
+            reply_messages(event.reply_token,[weight_saved_flex(user_id,row)])
+            return
+
+        # V6.1：查看任意日期飲食
+        if any(k in text for k in ["紀錄","吃了什麼","飲食"]) and (
+            any(k in text for k in ["昨天","昨日","前天"]) or re.search(r'\d{1,2}/\d{1,2}',text)
+        ):
+            reply_messages(event.reply_token,[history_day_flex(user_id,_extract_date_from_text(text))])
+            return
+
+        # V6.1：指定日期整餐刪除
+        md=re.search(r'(早餐|午餐|晚餐|點心)',text)
+        if md and any(k in text for k in ["刪掉","刪除","清掉"]) and (
+            any(k in text for k in ["昨天","昨日","前天"]) or re.search(r'\d{1,2}/\d{1,2}',text)
+        ):
+            reply_messages(event.reply_token,[meal_manage_flex(user_id,_extract_date_from_text(text),md.group(1))])
+            return
+
+        # V6.1：指定日期喝水補登
+        water_amt=extract_water_amount(text)
+        if water_amt and has_plain_water_context(text) and (
+            any(k in text for k in ["昨天","昨日","前天"]) or re.search(r'\d{1,2}/\d{1,2}',text)
+        ):
+            d=_extract_date_from_text(text)
+            save_water_history(user_id,water_amt,d)
+            reply_messages(event.reply_token,[water_dashboard_flex(user_id,d,water_amt)])
+            return
+
+                # 1) 喝水查詢先攔截，避免「我今天喝了多少水」被當成飲食或喝水新增。
         water_query_compact = re.sub(r"\s+", "", text)
         if (
             ("水" in water_query_compact or "喝" in water_query_compact)
@@ -2183,14 +2457,8 @@ def handle_text(event):
                 return
 
             try:
-                add_water(user_id, amount)
-                reply_text(
-                    event.reply_token,
-                    water_status_reply(
-                        user_id,
-                        f"✅ +{round(amount):,} mL，記下來了。"
-                    )
-                )
+                save_water_history(user_id, amount)
+                reply_messages(event.reply_token,[water_dashboard_flex(user_id,just_added=amount)])
             except ValueError as e:
                 reply_text(event.reply_token, f"⚠️ {e}")
             return
@@ -2358,8 +2626,8 @@ def handle_text(event):
 
         if weight_match and any(k in text for k in ["今天", "體重", "公斤", "kg"]):
             weight = float(weight_match.group(1))
-            save_weight(user_id, weight)
-            reply_text(event.reply_token, f"⚖️ 記下來了：今天 {weight:g} kg")
+            row=save_weight_history(user_id, weight, _extract_date_from_text(text))
+            reply_messages(event.reply_token,[weight_saved_flex(user_id,row)])
             return
 
         # -------------------------------------------------
@@ -2804,29 +3072,31 @@ def handle_image(event):
             memories,
         )
 
-        meal_id = save_meal(
-            user_id,
-            food_data,
-        )
+        food_data=enrich_foods_from_catalog(food_data)
+        now=datetime.now(TAIWAN_TZ)
+        pending=get_pending_meal(user_id)
+        can_merge=False
+        if pending and pending.get("created_at"):
+            try:
+                created=pending["created_at"]
+                if created.tzinfo is None: created=created.replace(tzinfo=TAIWAN_TZ)
+                can_merge=(now-created.astimezone(TAIWAN_TZ)).total_seconds() <= 180
+            except Exception:
+                can_merge=False
 
-        print(
-            "MEAL_SAVED:",
-            f"user={user_id}",
-            f"meal_id={meal_id}",
-            flush=True,
-        )
+        new_foods=food_data.get("foods") or []
+        if can_merge:
+            merged=_dedupe_foods((pending.get("foods") or [])+new_foods)
+            images=list(pending.get("source_images") or [])+[{"message_id":message_id}]
+            row=update_pending_meal(user_id,pending["id"],merged,source_images=images)
+        else:
+            row=create_pending_meal(
+                user_id,_dedupe_foods(new_foods),
+                source_images=[{"message_id":message_id}]
+            )
 
-        reply_messages(
-            event.reply_token,
-            [
-                make_meal_card(
-                    food_data,
-                    get_today_totals(user_id),
-                    user_id,
-                    corrected=False,
-                )
-            ],
-        )
+        print("PENDING_MEAL:",f"user={user_id}",f"pending_id={row['id']}",flush=True)
+        reply_messages(event.reply_token,[pending_meal_flex(row)])
 
     except Exception as e:
         print("IMAGE_ERROR:", repr(e), flush=True)
