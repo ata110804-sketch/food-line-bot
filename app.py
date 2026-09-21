@@ -2417,7 +2417,7 @@ def handle_text(event):
             if typ=="meal":
                 mt=ctx.get("meal_type") or "其他"
                 start_loading(user_id,60)
-                fd=enrich_foods_from_catalog(analyze_food_text(text,mt))
+                fd=enrich_foods_from_catalog(analyze_food_text(text))
                 foods=_dedupe_foods(fd.get("foods") or [])
                 row=create_pending_meal(user_id,foods,meal_type=mt,meal_date=d)
                 clear_record_context(user_id)
@@ -2447,12 +2447,29 @@ def handle_text(event):
                 # 讓下面的日期體重/身體數據 parser 接手，但保留 context 到成功才清除
                 pass
 
+        # V6.5：也接受「9/20吃火鍋」這種日期＋食物寫法。
+        # 若剛從日期中心選過餐別，就沿用該餐別；否則先歸到「其他」，日期絕不偷跑回今天。
+        dm_simple=re.match(r'^\s*((?:(?:\d{4}[/-])?\d{1,2}[/-]\d{1,2}|(?:\d{4}年)?\d{1,2}月\d{1,2}日|昨天|昨日|前天))\s*(?:的)?\s*(?:吃|喝|吃了|喝了)?\s*(.+)$',text)
+        if dm_simple and dm_simple.group(2).strip() and not re.match(r'^(早餐|午餐|晚餐|點心)',dm_simple.group(2).strip()):
+            d=_extract_date_from_text(dm_simple.group(1))
+            ctx2=get_record_context(user_id)
+            mt='其他'
+            if ctx2 and ctx2.get('record_type')=='meal' and _resolve_date(ctx2.get('target_date'))==d:
+                mt=ctx2.get('meal_type') or '其他'
+            meal_text=re.sub(r'^(?:吃|喝|吃了|喝了)\s*','',dm_simple.group(2).strip()).strip()
+            start_loading(user_id,60)
+            fd=enrich_foods_from_catalog(analyze_food_text(meal_text))
+            row=create_pending_meal(user_id,_dedupe_foods(fd.get('foods') or []),meal_type=mt,meal_date=d)
+            clear_record_context(user_id)
+            reply_messages(event.reply_token,[pending_meal_flex(row)])
+            return
+
         # 直接一句補登指定日期餐點，例如「9/20晚餐火鍋」
         dm=re.match(r'^\s*(?:(?:\d{4}[/-])?\d{1,2}[/-]\d{1,2}|(?:\d{4}年)?\d{1,2}月\d{1,2}日|昨天|昨日|前天)\s*(?:的)?\s*(早餐|午餐|晚餐|點心)\s*[:：]?\s*(.+)$',text)
         if dm and dm.group(2).strip():
             d=_extract_date_from_text(text); mt=dm.group(1); meal_text=dm.group(2).strip()
             start_loading(user_id,60)
-            fd=enrich_foods_from_catalog(analyze_food_text(meal_text,mt))
+            fd=enrich_foods_from_catalog(analyze_food_text(meal_text))
             row=create_pending_meal(user_id,_dedupe_foods(fd.get("foods") or []),meal_type=mt,meal_date=d)
             reply_messages(event.reply_token,[pending_meal_flex(row)])
             return
@@ -2562,7 +2579,7 @@ def handle_text(event):
                 meal_text = str(meal.get("text") or "").strip()
                 if not meal_text:
                     continue
-                food_data = analyze_food_text(meal_text, meal_type)
+                food_data = analyze_food_text(meal_text)
                 food_data["meal_type"] = meal_type
                 save_meal(user_id, food_data, meal_date=target_d, meal_type=meal_type)
                 saved.append((meal_type, food_data))
@@ -2997,7 +3014,7 @@ def handle_text(event):
                 if not meal_text:
                     continue
 
-                food_data = analyze_food_text(meal_text, meal_type)
+                food_data = analyze_food_text(meal_text)
                 food_data["meal_type"] = meal_type
                 save_meal(user_id, food_data, meal_date=target_d, meal_type=meal_type)
                 saved.append((meal_type, food_data))
@@ -3308,16 +3325,26 @@ def handle_image(event):
                 can_merge=False
 
         new_foods=food_data.get("foods") or []
+        image_ctx=get_record_context(user_id)
+        image_date=None; image_meal_type=None
+        if image_ctx and image_ctx.get("record_type")=="meal":
+            image_date=_resolve_date(image_ctx.get("target_date"))
+            image_meal_type=image_ctx.get("meal_type") or "其他"
+            # 只允許同日期/同餐別的照片合併，避免歷史餐點和今天餐點黏在一起。
+            if pending and (pending.get("meal_date")!=image_date or (pending.get("meal_type") or "其他")!=image_meal_type):
+                can_merge=False
         if can_merge:
             merged=_dedupe_foods((pending.get("foods") or [])+new_foods)
             images=list(pending.get("source_images") or [])+[{"message_id":message_id}]
             row=update_pending_meal(user_id,pending["id"],merged,source_images=images)
         else:
             row=create_pending_meal(
-                user_id,_dedupe_foods(new_foods),
+                user_id,_dedupe_foods(new_foods),meal_type=image_meal_type,meal_date=image_date,
                 source_images=[{"message_id":message_id}]
             )
 
+        if image_ctx and image_ctx.get("record_type")=="meal":
+            clear_record_context(user_id)
         print("PENDING_MEAL:",f"user={user_id}",f"pending_id={row['id']}",flush=True)
         reply_messages(event.reply_token,[pending_meal_flex(row)])
 
