@@ -1811,14 +1811,16 @@ def _date_from_text(text):
 
 def _parse_exercise_log(text):
     compact=re.sub(r"\s+","",text)
-    if not any(k in compact for k in ['運動','健身','走路','快走','跑步','游泳','騎車','腳踏車','深蹲','臀橋','重訓','瑜珈','有氧','練腿','練背','練胸']): return None
-    if any(k in compact for k in ['建議','推薦','做什麼','菜單','怎麼練','可以做']): return None
-    m=re.search(r'(\d+(?:\.\d+)?)\s*(小時|分鐘|分)',text)
-    minutes=None
-    if m: minutes=float(m.group(1))*(60 if m.group(2)=='小時' else 1)
-    if not minutes: return None
-    kind=next((k for k in ['健身','快走','走路','跑步','游泳','騎車','腳踏車','深蹲','臀橋','重訓','瑜珈','有氧','練腿','練背','練胸'] if k in compact),'運動')
-    return kind,minutes
+    if any(k in compact for k in ['建議','推薦','做什麼','菜單','怎麼練','可以做','要練什麼']): return None
+    step_m=re.search(r'(\d{3,6})\s*步',text)
+    time_m=re.search(r'(\d+(?:\.\d+)?)\s*(小時|分鐘|分)',text)
+    steps=int(step_m.group(1)) if step_m else None
+    minutes=float(time_m.group(1))*(60 if time_m and time_m.group(2)=='小時' else 1) if time_m else None
+    aliases=[('快走','快走'),('健走','快走'),('走路','走路'),('步行','走路'),('散步','走路'),('跑步','跑步'),('慢跑','跑步'),('游泳','游泳'),('騎車','騎車'),('腳踏車','騎車'),('重訓','重訓'),('健身','健身'),('深蹲','深蹲'),('臀橋','臀橋'),('瑜珈','瑜珈'),('瑜伽','瑜珈'),('有氧','有氧'),('練腿','練腿'),('練背','練背'),('練胸','練胸')]
+    kind=next((label for key,label in aliases if key in compact),None)
+    if not kind and steps: kind='走路'
+    if not kind or (not minutes and not steps): return None
+    return kind,minutes,steps
 
 def _exercise_history_reply(user_id,text):
     from datetime import timedelta
@@ -1845,10 +1847,19 @@ def handle_exercise_text_v56(event,user_id,text):
         reply_messages(event.reply_token,[exercise_choice_flex(user_id)]); return True
     parsed=_parse_exercise_log(text)
     if parsed:
-        kind,mins=parsed; met={'走路':3.3,'快走':4.3,'跑步':7.5,'游泳':6.0,'騎車':5.5,'腳踏車':5.5,'瑜珈':2.8}.get(kind,5.0)
-        lo,hi=_cal_range(user_id,mins,met); kcal=round((lo+hi)/2); d=_date_from_text(text)
-        save_exercise(user_id,kind,mins,kcal,'中等','自然語言補登',d)
-        reply_text(event.reply_token,f"✅ 補登完成｜{d.strftime('%m/%d')}\n🏃 {kind}　⏱ {round(mins)} 分\n🔥 約 {kcal} kcal\n有做就算數，沒有漏掉 😎"); return True
+        kind,mins,steps=parsed; d=_date_from_text(text)
+        if steps:
+            profile=get_profile(user_id) or {}; weight=float(profile.get('weight_kg') or 60)
+            km=steps*0.0007; kcal=round(km*weight*0.55)
+            if not mins: mins=round(steps/100,1)  # 約100步/分鐘，僅供紀錄時間估算
+        else:
+            met={'走路':3.3,'快走':4.3,'跑步':7.5,'游泳':6.0,'騎車':5.5,'瑜珈':2.8}.get(kind,5.0)
+            lo,hi=_cal_range(user_id,mins,met); kcal=round((lo+hi)/2)
+        note='自然語言補登'+(f'；{steps}步' if steps else '')
+        row=save_exercise(user_id,kind,mins,kcal,'中等',note,d)
+        extra=f"🚶 {steps:,} 步\n" if steps else ''
+        reply_text(event.reply_token,f"✅ 運動已記錄｜{d.strftime('%m/%d')}\n🏃 {kind}\n{extra}⏱ 約 {round(mins)} 分\n🔥 約 {kcal} kcal\n\n✏️ 之後也可以直接說『9/19走8000步』補登。")
+        return True
     if any(k in compact for k in ['昨天有做','前天有做','那套做完','剛剛那套做完']):
         d=_date_from_text(text); row=get_latest_exercise_plan(user_id,target_date=d)
         if row: reply_text(event.reply_token,_finish_plan(user_id,row['id'],1.0)); return True
@@ -1939,7 +1950,7 @@ def _resolve_date(value=None):
     if value in ("前天",): return today-__import__("datetime").timedelta(days=2)
     if hasattr(value,"year"): return value
     txt=str(value).strip()
-    m=re.search(r'(?:(\d{4})[/-])?(\d{1,2})[/-](\d{1,2})',txt)
+    m=re.search(r'(?:(\d{4})(?:年|[/-]))?(\d{1,2})(?:月|[/-])(\d{1,2})(?:日)?',txt)
     if m:
         y=int(m.group(1) or today.year); mo=int(m.group(2)); d=int(m.group(3))
         return __import__("datetime").date(y,mo,d)
@@ -2271,7 +2282,7 @@ def handle_text(event):
 
         # V6.1：指定日期體重。先處理，避免被「個人資料」覆蓋邏輯攔走。
         wm=re.search(r'(?:體重\s*)?(\d{2,3}(?:\.\d+)?)\s*(?:kg|公斤)?',text,re.I)
-        if wm and "體重" in text and any(k in text for k in ["今天","今日","昨天","昨日","前天","/","-"]):
+        if wm and "體重" in text and any(k in text for k in ["今天","今日","昨天","昨日","前天","/","-","月","日"]):
             d=_extract_date_from_text(text); w=float(wm.group(1))
             row=save_weight_history(user_id,w,d)
             reply_messages(event.reply_token,[weight_saved_flex(user_id,row)])
@@ -2279,7 +2290,7 @@ def handle_text(event):
 
         # V6.1：查看任意日期飲食
         if any(k in text for k in ["紀錄","吃了什麼","飲食"]) and (
-            any(k in text for k in ["昨天","昨日","前天"]) or re.search(r'\d{1,2}/\d{1,2}',text)
+            any(k in text for k in ["昨天","昨日","前天"]) or re.search(r'\d{1,2}(?:/|月)\d{1,2}',text)
         ):
             reply_messages(event.reply_token,[history_day_flex(user_id,_extract_date_from_text(text))])
             return
@@ -2287,7 +2298,7 @@ def handle_text(event):
         # V6.1：指定日期整餐刪除
         md=re.search(r'(早餐|午餐|晚餐|點心)',text)
         if md and any(k in text for k in ["刪掉","刪除","清掉"]) and (
-            any(k in text for k in ["昨天","昨日","前天"]) or re.search(r'\d{1,2}/\d{1,2}',text)
+            any(k in text for k in ["昨天","昨日","前天"]) or re.search(r'\d{1,2}(?:/|月)\d{1,2}',text)
         ):
             reply_messages(event.reply_token,[meal_manage_flex(user_id,_extract_date_from_text(text),md.group(1))])
             return
@@ -2295,9 +2306,11 @@ def handle_text(event):
         # V6.1：指定日期喝水補登
         water_amt=extract_water_amount(text)
         if water_amt and has_plain_water_context(text) and (
-            any(k in text for k in ["昨天","昨日","前天"]) or re.search(r'\d{1,2}/\d{1,2}',text)
+            any(k in text for k in ["昨天","昨日","前天"]) or re.search(r'\d{1,2}(?:/|月)\d{1,2}',text)
         ):
             d=_extract_date_from_text(text)
+            if any(k in text for k in ["總共","總量","改成","修改成","其實是"]):
+                for r in get_water_history(user_id,d): delete_water_entry(user_id,r['id'])
             save_water_history(user_id,water_amt,d)
             reply_messages(event.reply_token,[water_dashboard_flex(user_id,d,water_amt)])
             return
