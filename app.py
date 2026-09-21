@@ -130,6 +130,9 @@ from database import (
     search_food_catalog,
     save_body_measurement,
     get_body_measurements,
+    set_record_context,
+    get_record_context,
+    clear_record_context,
 )
 
 
@@ -154,7 +157,7 @@ except Exception as e:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE Food AI Bot V6.1 is running!"
+    return "LINE Food AI Bot V6.3 is running!"
 
 
 @app.route("/callback", methods=["POST"])
@@ -670,6 +673,23 @@ def profile_summary(user_id):
     else:
         lines.extend(["", missing_profile_text(profile)])
 
+    try:
+        body_logs=get_body_measurements(user_id,limit=1)
+        if body_logs:
+            b=body_logs[0]; vals=[]
+            for k,label in [("waist_cm","腰圍"),("hip_cm","臀圍"),("chest_cm","胸圍"),("thigh_cm","大腿圍"),("arm_cm","手臂圍")]:
+                if b.get(k) is not None: vals.append(f"{label}{float(b[k]):g}cm")
+            if vals: lines.extend(["",f"📏 最近身體數據｜{b['log_date'].strftime('%m/%d')}", "｜".join(vals)])
+        ibs=get_inbody_logs(user_id,limit=1)
+        if ibs:
+            ib=ibs[0]; vals=[]
+            for k,label,suffix in [("body_fat_percent","體脂","%"),("skeletal_muscle_kg","骨骼肌","kg"),("bmi","BMI",""),("visceral_fat_level","內臟脂肪","")]:
+                if ib.get(k) is not None: vals.append(f"{label}{float(ib[k]):g}{suffix}")
+            if vals: lines.extend([f"🧬 最近 InBody｜{ib['log_date'].strftime('%m/%d')}", "｜".join(vals)])
+    except Exception as e:
+        print("PROFILE_EXTRA_SUMMARY_ERROR",repr(e),flush=True)
+
+    lines.extend(["","📅 想補以前資料：直接說「9/19腰圍75」或「9/19體脂30%」。"])
     return "\n".join(lines)
 
 
@@ -679,6 +699,8 @@ def profile_help():
         "例如：身高162 體重59 年齡27 女 久坐 減脂\n\n"
         "活動量：久坐／輕量／中等／高／非常高\n"
         "目標：減脂／維持／增肌\n\n"
+        "也能另外記錄：體脂、腰圍、臀圍、胸圍、大腿圍、手臂圍、InBody。\n"
+        "而且可以補日期，例如「9/19腰圍75」。\n\n"
         "少填一項沒關係，我只問缺的 😎"
     )
 
@@ -1959,15 +1981,63 @@ def _resolve_date(value=None):
 def _extract_date_from_text(text):
     if "前天" in text: return _resolve_date("前天")
     if "昨天" in text or "昨日" in text: return _resolve_date("昨天")
-    m=re.search(r'(?:(\d{4})[/-])?(\d{1,2})[/-](\d{1,2})',text)
+    m=re.search(r'(?:(\d{4})(?:年|[/-]))?(\d{1,2})(?:月|[/-])(\d{1,2})(?:日)?',text)
     if m: return _resolve_date(m.group(0))
     return _resolve_date("今天")
+
+def _has_explicit_date(text):
+    return bool(any(k in text for k in ["昨天","昨日","前天"]) or
+                re.search(r'(?:(?:\d{4})(?:年|[/-]))?\d{1,2}(?:月|[/-])\d{1,2}(?:日)?',text))
+
+def _date_label(d):
+    d=_resolve_date(d)
+    today=datetime.now(TAIWAN_TZ).date()
+    if d==today: return "今天"
+    if d==today-__import__("datetime").timedelta(days=1): return "昨天"
+    if d==today-__import__("datetime").timedelta(days=2): return "前天"
+    return d.strftime("%m/%d")
 
 def _meal_group_totals(rows):
     out={"calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sodium":0,"sugar":0}
     for r in rows:
         for k in out: out[k]+=float(r.get(k) or 0)
     return out
+
+def date_record_center_flex(user_id,target_date=None):
+    d=_resolve_date(target_date)
+    body=[
+      {"type":"text","text":f"📅 {_date_label(d)}｜{d.strftime('%m/%d')}","weight":"bold","size":"xl"},
+      {"type":"text","text":"要補哪一種紀錄？","size":"sm","color":"#666666","margin":"sm"},
+      {"type":"separator","margin":"md"},
+      {"type":"text","text":"🍱 飲食","weight":"bold","margin":"md"},
+      {"type":"box","layout":"horizontal","spacing":"sm","margin":"sm","contents":[
+        _action_button("早餐",f"record:meal:{d.isoformat()}:早餐"),
+        _action_button("午餐",f"record:meal:{d.isoformat()}:午餐")]},
+      {"type":"box","layout":"horizontal","spacing":"sm","margin":"sm","contents":[
+        _action_button("晚餐",f"record:meal:{d.isoformat()}:晚餐"),
+        _action_button("點心",f"record:meal:{d.isoformat()}:點心")]},
+      {"type":"separator","margin":"md"},
+      _action_button("💧 喝水",f"record:water:{d.isoformat()}"),
+      _action_button("🏃 運動",f"record:exercise:{d.isoformat()}"),
+      _action_button("⚖️ 體重／身體數據",f"record:body:{d.isoformat()}"),
+      _action_button("📒 查看這天",f"history:day:{d.isoformat()}")
+    ]
+    footer={"type":"box","layout":"horizontal","spacing":"sm","contents":[
+      _action_button("⬅️ 前一天",f"record:date:{(d-__import__('datetime').timedelta(days=1)).isoformat()}"),
+      _action_button("➡️ 後一天",f"record:date:{(d+__import__('datetime').timedelta(days=1)).isoformat()}")]}
+    return FlexMessage(alt_text=f"📅 {d.strftime('%m/%d')} 紀錄中心",contents=FlexContainer.from_dict(
+      {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},"footer":footer}))
+
+def body_measurement_saved_flex(row):
+    d=_resolve_date(row.get("log_date"))
+    labels=[("waist_cm","腰圍"),("hip_cm","臀圍"),("chest_cm","胸圍"),("thigh_cm","大腿圍"),("arm_cm","手臂圍")]
+    lines=[{"type":"text","text":f"✅ {d.strftime('%m/%d')} 身體數據","weight":"bold","size":"xl"}]
+    for k,label in labels:
+        if row.get(k) is not None:
+            lines.append({"type":"text","text":f"{label}　{float(row[k]):g} cm","margin":"sm"})
+    return FlexMessage(alt_text="身體數據已記錄",contents=FlexContainer.from_dict(
+      {"type":"bubble","body":{"type":"box","layout":"vertical","contents":lines},
+       "footer":{"type":"box","layout":"vertical","contents":[_action_button("📅 回紀錄中心",f"record:date:{d.isoformat()}")]}}))
 
 def history_day_flex(user_id,target_date=None):
     d=_resolve_date(target_date); rows=get_active_meals_by_date(user_id,d)
@@ -1986,6 +2056,7 @@ def history_day_flex(user_id,target_date=None):
                  _action_button(f"✏️ 管理{mt}",f"history:meal:{d.isoformat()}:{mt}")]
     if not rows: body.append({"type":"text","text":"這天還沒有飲食紀錄。","margin":"md","color":"#777777"})
     else: body.insert(1,{"type":"text","text":f"🔥 全日 {round(total)} kcal","weight":"bold","size":"lg","margin":"md"})
+    body.append(_action_button("➕ 新增／補登這天",f"record:date:{d.isoformat()}","primary"))
     footer={"type":"box","layout":"horizontal","spacing":"sm","contents":[
       _action_button("⬅️ 前一天",f"history:day:{(d-__import__('datetime').timedelta(days=1)).isoformat()}"),
       _action_button("➡️ 後一天",f"history:day:{(d+__import__('datetime').timedelta(days=1)).isoformat()}")]}
@@ -2064,6 +2135,17 @@ def handle_postback_v56(event):
             reply_messages(event.reply_token,[today_dashboard_flex(user_id)]); return
         if data=='water:dash':
             reply_messages(event.reply_token,[water_dashboard_flex(user_id)]); return
+        m=re.match(r'record:date:(\d{4}-\d{2}-\d{2})$',data)
+        if m: reply_messages(event.reply_token,[date_record_center_flex(user_id,m.group(1))]); return
+        m=re.match(r'record:meal:(\d{4}-\d{2}-\d{2}):(早餐|午餐|晚餐|點心)$',data)
+        if m:
+            set_record_context(user_id,m.group(1),"meal",m.group(2))
+            reply_text(event.reply_token,f"🍱 現在補 {m.group(1)[5:]} {m.group(2)}\n直接輸入吃了什麼，我會先給確認卡再儲存。"); return
+        m=re.match(r'record:(water|exercise|body):(\d{4}-\d{2}-\d{2})$',data)
+        if m:
+            typ,d=m.group(1),m.group(2); set_record_context(user_id,d,typ)
+            tips={"water":"直接輸入「500ml」","exercise":"直接輸入「走5000步」或「跑步30分鐘」","body":"直接輸入「體重59」或「腰圍75」"}
+            reply_text(event.reply_token,f"📅 {d[5:]}\n{tips[typ]}"); return
         m=re.match(r'water:add:(200|300|500|600|1000)$',data)
         if m:
             amt=int(m.group(1)); save_water_history(user_id,amt)
@@ -2096,8 +2178,11 @@ def handle_postback_v56(event):
             delete_weight_history(user_id,m.group(1)); reply_text(event.reply_token,"🗑️ 這筆體重已刪除。"); return
         m=re.match(r'pending:confirm:(\d+)$',data)
         if m:
+            p=get_pending_meal(user_id,int(m.group(1)))
             row=confirm_pending_meal(user_id,int(m.group(1)))
-            if row: reply_messages(event.reply_token,[today_dashboard_flex(user_id)])
+            if row:
+                d=(p or row).get("meal_date")
+                reply_messages(event.reply_token,[history_day_flex(user_id,d)])
             else: reply_text(event.reply_token,"這份待確認餐點已處理或找不到了。")
             return
         m=re.match(r'pending:cancel:(\d+)$',data)
@@ -2234,6 +2319,18 @@ def handle_text(event):
             reply_messages(event.reply_token,[trend_menu_flex()])
             return
 
+        if text in ["紀錄日期","日期紀錄","補登","補紀錄","喝水日期","運動日期","飲食日期"]:
+            reply_messages(event.reply_token,[date_record_center_flex(user_id)])
+            return
+
+        # 「我要紀錄9/20的晚餐」：先選定日期/餐別，下一句直接輸入食物。
+        mctx=re.search(r'(?:我要)?(?:紀錄|記錄|補登|補記)?\s*(?:(昨天|昨日|前天)|((?:\d{4}[/-])?\d{1,2}[/-]\d{1,2}|(?:\d{4}年)?\d{1,2}月\d{1,2}日))\s*(?:的)?\s*(早餐|午餐|晚餐|點心)\s*$',text)
+        if mctx:
+            d=_extract_date_from_text(text); mt=mctx.group(3)
+            set_record_context(user_id,d,"meal",mt)
+            reply_text(event.reply_token,f"🍱 好，現在在補 {d.strftime('%m/%d')} {mt}。\n直接告訴我吃了什麼就好，例如：\n「火鍋，有牛肉、青菜、半碗飯」")
+            return
+
         ib=parse_inbody_text(text)
         if ib:
             row=save_inbody(user_id,ib)
@@ -2255,7 +2352,73 @@ def handle_text(event):
             return
 
         # -------------------------------------------------
-        # V5.6 運動：查詢 / 補登 / 建議（不碰 V5.5 飲食路由）
+        # V6.3 統一日期紀錄 context：按日期卡片後，下一句就是該日資料
+        # -------------------------------------------------
+        ctx=get_record_context(user_id)
+        if ctx:
+            d=_resolve_date(ctx.get("target_date")); typ=ctx.get("record_type")
+            if typ=="meal":
+                mt=ctx.get("meal_type") or "其他"
+                start_loading(user_id,60)
+                fd=enrich_foods_from_catalog(analyze_food_text(text,mt))
+                foods=_dedupe_foods(fd.get("foods") or [])
+                row=create_pending_meal(user_id,foods,meal_type=mt,meal_date=d)
+                clear_record_context(user_id)
+                reply_messages(event.reply_token,[pending_meal_flex(row)])
+                return
+            if typ=="water":
+                amt=extract_water_amount(text)
+                if amt:
+                    save_water_history(user_id,amt,d); clear_record_context(user_id)
+                    reply_messages(event.reply_token,[water_dashboard_flex(user_id,d,amt)]); return
+            if typ=="exercise":
+                parsed=_parse_exercise_log(text)
+                if parsed:
+                    kind,mins,steps=parsed
+                    if steps:
+                        profile=get_profile(user_id) or {}; weight=float(profile.get('weight_kg') or 60)
+                        km=steps*0.0007; kcal=round(km*weight*0.55)
+                        if not mins: mins=round(steps/100,1)
+                    else:
+                        met={'走路':3.3,'快走':4.3,'跑步':7.5,'游泳':6.0,'騎車':5.5,'瑜珈':2.8}.get(kind,5.0)
+                        lo,hi=_cal_range(user_id,mins,met); kcal=round((lo+hi)/2)
+                    save_exercise(user_id,kind,mins,kcal,'中等',f'日期中心補登'+(f'；{steps}步' if steps else ''),d)
+                    clear_record_context(user_id)
+                    reply_text(event.reply_token,f"✅ {d.strftime('%m/%d')} 運動已記錄\n🏃 {kind}"+(f"｜{steps:,}步" if steps else "")+f"\n🔥 約 {kcal} kcal")
+                    return
+            if typ=="body":
+                # 讓下面的日期體重/身體數據 parser 接手，但保留 context 到成功才清除
+                pass
+
+        # 直接一句補登指定日期餐點，例如「9/20晚餐火鍋」
+        dm=re.match(r'^\s*(?:(?:\d{4}[/-])?\d{1,2}[/-]\d{1,2}|(?:\d{4}年)?\d{1,2}月\d{1,2}日|昨天|昨日|前天)\s*(?:的)?\s*(早餐|午餐|晚餐|點心)\s*[:：]?\s*(.+)$',text)
+        if dm and dm.group(2).strip():
+            d=_extract_date_from_text(text); mt=dm.group(1); meal_text=dm.group(2).strip()
+            start_loading(user_id,60)
+            fd=enrich_foods_from_catalog(analyze_food_text(meal_text,mt))
+            row=create_pending_meal(user_id,_dedupe_foods(fd.get("foods") or []),meal_type=mt,meal_date=d)
+            reply_messages(event.reply_token,[pending_meal_flex(row)])
+            return
+
+        # 指定日期身體圍度
+        if _has_explicit_date(text):
+            vals={}
+            for k,pat in {
+                "waist_cm":r'腰圍\s*(\d+(?:\.\d+)?)',
+                "hip_cm":r'臀圍\s*(\d+(?:\.\d+)?)',
+                "chest_cm":r'胸圍\s*(\d+(?:\.\d+)?)',
+                "thigh_cm":r'(?:大腿圍|腿圍)\s*(\d+(?:\.\d+)?)',
+                "arm_cm":r'(?:手臂圍|臂圍)\s*(\d+(?:\.\d+)?)'}.items():
+                mm=re.search(pat,text,re.I)
+                if mm: vals[k]=float(mm.group(1))
+            if vals:
+                row=save_body_measurement(user_id,_extract_date_from_text(text),**vals)
+                clear_record_context(user_id)
+                reply_messages(event.reply_token,[body_measurement_saved_flex(row)])
+                return
+
+        # -------------------------------------------------
+        # V5.6 運動：查詢 / 補登 / 建議
         # -------------------------------------------------
         if handle_exercise_text_v56(event, user_id, text):
             return
@@ -2329,14 +2492,7 @@ def handle_text(event):
         #    支援：早餐兩顆蛋／我早餐吃兩顆蛋／早餐...午餐...晚餐...／剛剛吃了香蕉。
         rule_meals = parse_meal_log_by_rules(text)
         if rule_meals:
-            # 昨日補登目前不可偷寫成今天；保留安全擋板。
-            if "昨天" in text or "昨日" in text:
-                reply_text(
-                    event.reply_token,
-                    "📅 我知道你是在補昨天的飲食，但目前這版先不把它誤寫進今天。"
-                )
-                return
-
+            target_d=_extract_date_from_text(text) if _has_explicit_date(text) else _resolve_date("今天")
             start_loading(user_id, 60)
             saved = []
             for meal in rule_meals[:4]:
@@ -2346,7 +2502,7 @@ def handle_text(event):
                     continue
                 food_data = analyze_food_text(meal_text, meal_type)
                 food_data["meal_type"] = meal_type
-                save_meal(user_id, food_data, meal_type=meal_type)
+                save_meal(user_id, food_data, meal_date=target_d, meal_type=meal_type)
                 saved.append((meal_type, food_data))
 
             if saved:
@@ -2760,15 +2916,7 @@ def handle_text(event):
             meals = intent_data.get("meals") or []
             target_date = intent_data.get("target_date")
 
-            # V5.4 第一階段先正式支援「今天」文字記餐。
-            # 昨日補登會在 database.py V5.4 接上指定日期後開放，避免嘴上說昨天卻寫進今天。
-            if target_date == "昨天" or "昨天" in text or "昨日" in text:
-                reply_text(
-                    event.reply_token,
-                    "📅 我有看懂你是在補昨天的飲食，但目前先不亂寫進今天。\n"
-                    "下一版資料庫接上指定日期後，就會直接幫你補登昨天。",
-                )
-                return
+            target_d=_extract_date_from_text(text) if _has_explicit_date(text) else _resolve_date(target_date or "今天")
 
             if not meals:
                 reply_text(
@@ -2789,7 +2937,7 @@ def handle_text(event):
 
                 food_data = analyze_food_text(meal_text, meal_type)
                 food_data["meal_type"] = meal_type
-                save_meal(user_id, food_data, meal_type=meal_type)
+                save_meal(user_id, food_data, meal_date=target_d, meal_type=meal_type)
                 saved.append((meal_type, food_data))
 
             if not saved:
