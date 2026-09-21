@@ -2,6 +2,7 @@ import os
 import json
 import time
 import random
+import re
 
 from openai import OpenAI
 
@@ -274,6 +275,21 @@ confidence：
 ━━━━━━━━━━━━━━━━━━
 【六、份量估計】
 ━━━━━━━━━━━━━━━━━━
+
+【V6.7 份量最高優先規則】
+所有照片、文字新增、補漏與餐點修正一律遵守：
+1. 使用者明確重量／容量／數量／份量
+2. 使用者大小描述
+3. 食品資料庫或系統標準份量
+4. AI 一般估算
+
+例如 120g、350ml、半碗、1/3碗、半盤、3片、2塊、3隻、一小口，都高於預設份量。
+「小顆／小份／小碗」與「大顆／大份／大碗」高於系統預設。
+只有完全沒有份量線索時，才使用預設份量。
+使用者後續更正時必須修改原項目，不得新增重複項目。
+份量改變後 calories、protein、carbs、fat、fiber、sodium 必須全部重算。
+食品資料庫 serving 只是標準份量，不能覆蓋使用者明確提供的實際份量。
+
 
 參考：
 
@@ -1375,6 +1391,71 @@ def food_chat(
 
 
 # =========================================================
+# V6.7 使用者份量解析
+# =========================================================
+_SIZE_MULTIPLIERS={"超小":0.55,"迷你":0.60,"小顆":0.70,"小份":0.70,"小碗":0.70,"小杯":0.70,"小盤":0.70,
+                   "中顆":1.0,"中等":1.0,"一般":1.0,"大顆":1.30,"大份":1.30,"大碗":1.30,"大杯":1.30,"大盤":1.30,"特大":1.55}
+_UNIT_WORDS="碗|盤|杯|盒|包|瓶|罐|顆|個|條|根|片|塊|隻|匙|湯匙|茶匙|口|份"
+
+def _cn_number(v):
+    d={"半":0.5,"一":1,"兩":2,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}
+    if v in d:return float(d[v])
+    try:return float(v)
+    except:return None
+
+def _extract_portion_hint(text):
+    t=str(text or "").strip()
+    m=re.search(r'(\d+(?:\.\d+)?)\s*(kg|公斤|g|克)(?![a-zA-Z])',t,re.I)
+    if m:
+        n=float(m.group(1)); u=m.group(2).lower()
+        return {"kind":"grams","grams":n*1000 if u in ("kg","公斤") else n,"label":m.group(0),"priority":3}
+    m=re.search(r'(\d+(?:\.\d+)?)\s*(ml|毫升|cc|l|公升)(?![a-zA-Z])',t,re.I)
+    if m:
+        n=float(m.group(1)); u=m.group(2).lower()
+        return {"kind":"volume","grams":n*1000 if u in ("l","公升") else n,"label":m.group(0),"priority":3}
+    for pat,mult in [(r'(?:1/2|二分之一|一半|半)\s*('+_UNIT_WORDS+r')',.5),
+                     (r'(?:1/3|三分之一)\s*('+_UNIT_WORDS+r')',1/3),
+                     (r'(?:2/3|三分之二)\s*('+_UNIT_WORDS+r')',2/3),
+                     (r'(?:1/4|四分之一)\s*('+_UNIT_WORDS+r')',.25)]:
+        mm=re.search(pat,t)
+        if mm:return {"kind":"unit","multiplier":mult,"unit":mm.group(1),"label":mm.group(0),"priority":3}
+    if "一小口" in t or "小口" in t:return {"kind":"relative","multiplier":.10,"label":"一小口","priority":3}
+    if "一大口" in t or "大口" in t:return {"kind":"relative","multiplier":.20,"label":"一大口","priority":3}
+    m=re.search(r'(\d+(?:\.\d+)?|[一二兩三四五六七八九十])\s*('+_UNIT_WORDS+r')',t)
+    if m:
+        n=_cn_number(m.group(1))
+        if n is not None:return {"kind":"unit","multiplier":n,"unit":m.group(2),"label":m.group(0),"priority":3}
+    if any(x in t for x in ("只吃一半","只喝一半","吃一半","喝一半","半份")):
+        return {"kind":"relative","multiplier":.5,"label":"一半","priority":3}
+    for word,mult in _SIZE_MULTIPLIERS.items():
+        if word in t:return {"kind":"size","multiplier":mult,"label":word,"priority":2}
+    return None
+
+def _scale_food(food,multiplier,quantity=None,grams=None):
+    f=dict(food or {}); m=max(float(multiplier or 0),0)
+    for k in ("calories","protein","carbs","fat","fiber","sodium","sugar"):
+        if k in f:f[k]=round(float(f.get(k) or 0)*m,1)
+    if grams is None:grams=float(f.get("estimated_grams") or 0)*m
+    f["estimated_grams"]=round(float(grams or 0),1)
+    if quantity:f["quantity"]=quantity
+    return f
+
+def _apply_explicit_portion_to_catalog(food,row,hint):
+    if not hint:return food
+    sg=float(row.get("serving_grams") or 0)
+    if hint["kind"] in ("grams","volume"):
+        target=float(hint["grams"])
+        if sg>0:return _scale_food(food,target/sg,hint["label"],target)
+        f=dict(food);f["estimated_grams"]=target;f["quantity"]=hint["label"];return f
+    return _scale_food(food,float(hint.get("multiplier") or 1),hint.get("label"))
+
+def _recalculate_total(data):
+    data=dict(data or {}); foods=data.get("foods") or []
+    data["total"]={k:round(sum(float(x.get(k) or 0) for x in foods),1)
+                   for k in ("calories","protein","carbs","fat","fiber","sodium","sugar")}
+    return data
+
+# =========================================================
 # V6.1 台灣食品資料庫整合
 # =========================================================
 def _db_food_search(query, brand=None, limit=8):
@@ -1464,44 +1545,40 @@ def enrich_foods_from_catalog(data):
 
 
 def analyze_food_text(text, memories=None):
-    """
-    V6.1 文字記餐入口。
-    先嘗試 Neon 精確食品匹配；無法可靠匹配才交給 AI。
-    """
-    q = str(text or "").strip()
-    matches = _db_food_search(q, limit=5)
+    """V6.7：明確重量/份量 > 大小描述 > catalog標準份量 > AI估算。"""
+    q=str(text or "").strip()
+    hint=_extract_portion_hint(q)
+
+    search_q=re.sub(r'\d+(?:\.\d+)?\s*(?:kg|公斤|g|克|ml|毫升|cc|l|公升)(?![a-zA-Z])','',q,flags=re.I)
+    search_q=re.sub(r'(?:1/2|1/3|2/3|1/4|二分之一|三分之一|三分之二|四分之一|一半|半)\s*(?:'+_UNIT_WORDS+r')','',search_q)
+    search_q=re.sub(r'(?:超小|迷你|小顆|小份|小碗|小杯|小盤|中顆|中等|一般|大顆|大份|大碗|大杯|大盤|特大)','',search_q)
+    search_q=search_q.strip(" ，,。")
+
+    matches=_db_food_search(search_q or q,limit=5)
     if matches:
-        best = matches[0]
-        product = str(best.get("product_name") or "").strip()
-        # 完整品名/別名命中時直接採資料庫，避免 AI 重估官方食品。
-        aliases = [str(x).strip().lower() for x in (best.get("aliases") or [])]
-        if q.lower() == product.lower() or q.lower() in aliases:
-            food = _catalog_item_to_food(best)
-            return {
-                "meal_name": product,
-                "foods": [food],
-                "total": {
-                    "calories": food["calories"], "protein": food["protein"],
-                    "carbs": food["carbs"], "fat": food["fat"],
-                    "fiber": food["fiber"], "sodium": food["sodium"],
-                    "sugar": food["sugar"],
-                },
-                "confidence": "high",
-                "comment": "已優先使用食品資料庫資料。",
-            }
+        best=matches[0]; product=str(best.get("product_name") or "").strip()
+        aliases=[str(x).strip().lower() for x in (best.get("aliases") or [])]
+        normalized=(search_q or q).lower()
+        if normalized==product.lower() or normalized in aliases:
+            food=_apply_explicit_portion_to_catalog(_catalog_item_to_food(best),best,hint)
+            return _recalculate_total({"meal_name":product,"foods":[food],"total":{},"confidence":"high",
+                                       "comment":"已優先使用食品資料庫，並以使用者提供的份量為最高優先。"})
 
-    memory_lines = []
+    memory_lines=[]
     for memory in memories or []:
-        mt = memory.get("memory_text", "")
-        if mt:
-            memory_lines.append(f"- {mt}")
+        if isinstance(memory,dict) and memory.get("memory_text"):memory_lines.append("- "+memory["memory_text"])
 
-    prompt = f"""分析使用者這段飲食紀錄：\n「{q}」\n\n請辨識所有實際吃喝的品項與份量，逐項估算營養，再加總。不要把「刪除、修改、查詢、今天吃什麼」等操作句當成食物。"""
-    if memory_lines:
-        prompt += "\n\n使用者食物記憶（合理相符時才參考）：\n" + "\n".join(memory_lines)
+    hint_text=json.dumps(hint,ensure_ascii=False) if hint else "無"
+    prompt=f"""分析使用者這段飲食紀錄：
+「{q}」
 
-    data = structured_response(
-        FOOD_SYSTEM_PROMPT, prompt, FOOD_SCHEMA,
-        "food_text_analysis_v61", max_tokens=1600
-    )
+固定份量優先級：明確重量／份量 > 大小描述 > 系統預設份量 > AI一般估算。
+系統從原句解析到的高優先份量資訊：{hint_text}
+
+若有120g、350ml、半碗、1/3碗、半盤、3片、2塊、3隻、一小口、小顆/大顆等，
+必須以使用者資訊為準，逐項估算營養再加總，不可被一般預設份量覆蓋。
+不要把刪除、修改、查詢等操作句當成食物。"""
+    if memory_lines:prompt+="\n\n使用者食物記憶（合理相符才參考）：\n"+"\n".join(memory_lines)
+    data=structured_response(FOOD_SYSTEM_PROMPT,prompt,FOOD_SCHEMA,"food_text_analysis_v67",max_tokens=1600)
     return enrich_foods_from_catalog(data)
+
