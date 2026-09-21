@@ -2113,9 +2113,16 @@ def pending_meal_flex(p):
     body=[{"type":"text","text":"📸 餐點等待確認","weight":"bold","size":"xl"},
           {"type":"text","text":f"已合併 {len(p.get('source_images') or [])} 張照片｜確認後才會正式記錄","size":"sm","color":"#777777","wrap":True,"margin":"sm"},
           {"type":"text","text":f"🔥 約 {round(float(p.get('calories') or 0))} kcal","weight":"bold","size":"xxl","margin":"md"}]
-    for f in foods[:10]:
+    # V6.6：確認卡必須看得到「吃了多少」，不能只顯示名稱與熱量。
+    # LINE bubble 空間有限，顯示最多 14 項；超過時明確提示，不再默默截掉。
+    for f in foods[:14]:
         src="✓資料庫" if f.get("source_type") in ("official","catalog") else "AI估算"
-        body.append({"type":"text","text":f"・{f.get('name') or f.get('food_name') or '食物'}｜{round(float(f.get('calories') or 0))} kcal｜{src}","size":"sm","margin":"sm","wrap":True})
+        qty=str(f.get("quantity") or "").strip()
+        grams=float(f.get("estimated_grams") or 0)
+        portion=qty or (f"{round(grams)}g" if grams>0 else "份量未定")
+        body.append({"type":"text","text":f"・{f.get('name') or f.get('food_name') or '食物'}｜{portion}｜{round(float(f.get('calories') or 0))} kcal｜{src}","size":"sm","margin":"sm","wrap":True})
+    if len(foods)>14:
+        body.append({"type":"text","text":f"…另外還有 {len(foods)-14} 項（已計入總熱量）","size":"sm","color":"#777777","margin":"sm","wrap":True})
     footer={"type":"box","layout":"vertical","spacing":"sm","contents":[
       _action_button("✅ 確認儲存",f"pending:confirm:{p['id']}","primary"),
       _action_button("✏️ 修改這餐",f"pending:edit:{p['id']}"),
@@ -2396,15 +2403,30 @@ def handle_text(event):
                       "sodium":pending.get("sodium") or 0}
 
                 t=text.strip()
-                # 「有菜脯蛋 / 菜脯蛋 / 再加...」在修改模式一律視為補食物。
-                add_like=(typ=="pending_add" or
-                          bool(re.match(r'^(?:再加|加上|補上|還有|有|漏了|漏掉)\s*',t)) or
-                          not any(k in t for k in ["沒有","沒吃","沒喝","不是","改成","只有","只吃","只喝","一半","半份","少一點","比較少","比較多","更多","刪掉","刪除","拿掉"]))
-                if add_like:
-                    clean=re.sub(r'^(?:再加|加上|補上|還有|有|漏了|漏掉)\s*','',t).strip() or t
-                    changed=add_food_to_analysis(base,clean)
-                else:
+
+                # V6.6 智慧餐點編輯器：
+                # 「補漏」模式只代表入口，不代表使用者下一句一定是「新增」。
+                # 每一句都先看語意：刪除/份量/替換 => 修正；明確新增或純食物名 => 新增。
+                correction_words=[
+                    "沒有","沒吃","沒喝","不吃","不要","刪掉","刪除","拿掉","去掉",
+                    "改成","換成","不是","只有","只吃","只喝","一半","半份","半碗","半盤",
+                    "少一點","少吃","少喝","比較少","多一點","比較多",
+                    "吃一口","一小口","幾口","剩一半","剩下"
+                ]
+                explicit_add=bool(re.match(r'^(?:再加|加上|新增|補上|還有|有|漏了|漏掉)\s*',t))
+                is_correction=any(k in t for k in correction_words)
+
+                if is_correction:
+                    # 例如：板腱牛只吃半盤／白飯半碗／菜脯蛋沒吃／蝦子改3隻
                     changed=correct_food_analysis(base,t)
+                else:
+                    # 純食物名稱也能新增：板腱牛、豆漿、茶葉蛋、一根香蕉…
+                    clean=re.sub(r'^(?:再加|加上|新增|補上|還有|有|漏了|漏掉)\s*','',t).strip() if explicit_add else t
+                    changed=add_food_to_analysis(base,clean or t)
+
+                # AI 必須回傳完整餐點；若異常漏掉原資料，保護性退回原餐點而不是破壞紀錄。
+                if not isinstance(changed,dict) or not isinstance(changed.get("foods"),list):
+                    raise ValueError("餐點編輯結果格式不完整")
 
                 changed=enrich_foods_from_catalog(changed)
                 row=update_pending_meal(user_id,pending["id"],
