@@ -1658,26 +1658,94 @@ def water_dashboard_flex(user_id, target_date=None, just_added=None):
       {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},"footer":footer}))
 
 def today_dashboard_flex(user_id):
-    totals=totals_to_dict(get_today_totals(user_id))
-    targets=get_effective_targets(user_id) or {}
-    wt=float(get_water_total(user_id) or 0); wtg=float(get_water_target(user_id) or 2000)
-    metrics=[
-      ("🔥 熱量",totals.get("calories"),targets.get("calorie_target"),"kcal"),
-      ("🥩 蛋白質",totals.get("protein"),targets.get("protein_target"),"g"),
-      ("🍚 碳水",totals.get("carbs"),targets.get("carbs_target"),"g"),
-      ("🥑 脂肪",totals.get("fat"),targets.get("fat_target"),"g"),
-      ("💧 喝水",wt,wtg,"ml"),
+    """今日進度：飲食、營養、喝水、運動集中顯示。"""
+    today = datetime.now(TAIWAN_TZ).date()
+    totals = totals_to_dict(get_today_totals(user_id))
+    targets = get_effective_targets(user_id) or {}
+
+    try:
+        water_rows = get_water_history(user_id, today) or []
+        water_total = sum(float(r.get("amount_ml") or 0) for r in water_rows)
+    except Exception as e:
+        print("TODAY_DASH_WATER_ERROR:", repr(e), flush=True)
+        water_total = float(get_water_total(user_id) or 0)
+    water_target = float(get_water_target(user_id) or 2000)
+
+    try:
+        exercise_rows = get_exercise_by_date(user_id, today) or []
+        exercise_minutes = sum(float(r.get("duration_minutes") or 0) for r in exercise_rows)
+        exercise_kcal = sum(float(r.get("calories_burned") or r.get("calories") or 0) for r in exercise_rows)
+        exercise_count = len(exercise_rows)
+    except Exception as e:
+        print("TODAY_DASH_EXERCISE_ERROR:", repr(e), flush=True)
+        exercise_minutes = 0
+        exercise_kcal = 0
+        exercise_count = 0
+
+    metrics = [
+        ("🔥 熱量", totals.get("calories"), targets.get("calorie_target"), "kcal"),
+        ("🥩 蛋白質", totals.get("protein"), targets.get("protein_target"), "g"),
+        ("🍚 碳水", totals.get("carbs"), targets.get("carbs_target"), "g"),
+        ("🥑 脂肪", totals.get("fat"), targets.get("fat_target"), "g"),
+        ("💧 喝水", water_total, water_target, "ml"),
     ]
-    body=[{"type":"text","text":"📊 今日進度","weight":"bold","size":"xxl"},
-          {"type":"text","text":"重要的直接看剩多少，不塞圓餅圖。","size":"sm","color":"#777777","margin":"sm"}]
-    for label,used,target,unit in metrics:
-        used=float(used or 0); target=float(target or 0)
-        body += [{"type":"text","text":_metric_line(label,used,target,unit),"weight":"bold","size":"sm","margin":"md","wrap":True},
-                 {"type":"text","text":_progress_bar(used,target,12),"size":"sm","color":"#555555"}]
-    footer=[_action_button("🍱 吃什麼","diet:menu","primary"),_action_button("💧 喝水","water:dash"),_action_button("📅 歷史紀錄","history:today"),_action_button("📈 趨勢","trend:menu")]
-    return FlexMessage(alt_text="📊 今日進度",contents=FlexContainer.from_dict(
-      {"type":"bubble","size":"mega","body":{"type":"box","layout":"vertical","contents":body},
-       "footer":{"type":"box","layout":"vertical","spacing":"sm","contents":footer}}))
+
+    body = [
+        {"type":"text","text":"📊 今日進度","weight":"bold","size":"xxl","wrap":True},
+        {"type":"text","text":today.strftime("%m/%d") + "｜今天累積","size":"sm","color":"#777777","margin":"sm"},
+        {"type":"separator","margin":"lg"},
+    ]
+
+    for label, used, target, unit in metrics:
+        used = float(used or 0)
+        target = float(target or 0)
+        body.append({
+            "type":"text","text":_metric_line(label, used, target, unit),
+            "weight":"bold","size":"sm","margin":"md","wrap":True
+        })
+        body.append({
+            "type":"text","text":_progress_bar(used, target, 12),
+            "size":"sm","color":"#555555","margin":"xs"
+        })
+
+    body.extend([
+        {"type":"separator","margin":"lg"},
+        {"type":"text","text":"🏃 今日運動","weight":"bold","size":"md","margin":"lg"},
+        {
+            "type":"text",
+            "text": (
+                f"{exercise_count} 筆｜{round(exercise_minutes):g} 分鐘"
+                + (f"｜約 {round(exercise_kcal):g} kcal" if exercise_kcal > 0 else "")
+                if exercise_count > 0
+                else "今天還沒有運動紀錄"
+            ),
+            "size":"sm","color":"#555555","margin":"sm","wrap":True
+        },
+    ])
+
+    footer = {
+        "type":"box","layout":"vertical","spacing":"sm","contents":[
+            {"type":"box","layout":"horizontal","spacing":"sm","contents":[
+                _action_button("🍱 吃什麼","diet:menu","primary"),
+                _action_button("💧 喝水","water:dash")
+            ]},
+            {"type":"box","layout":"horizontal","spacing":"sm","contents":[
+                _action_button("🏃 運動","tpl:menu"),
+                _action_button("📅 紀錄","history:today")
+            ]},
+            _action_button("📈 我的趨勢","trend:menu")
+        ]
+    }
+
+    card = {
+        "type":"bubble","size":"mega",
+        "body":{"type":"box","layout":"vertical","paddingAll":"18px","contents":body},
+        "footer":footer
+    }
+    return FlexMessage(
+        alt_text="📊 今日進度",
+        contents=FlexContainer.from_dict(card),
+    )
 
 def water_chart_url(user_id,days=30):
     end=datetime.now(TAIWAN_TZ).date()
